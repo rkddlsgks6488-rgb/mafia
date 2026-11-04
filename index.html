@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>순우리말 마피아 - 고유어 라이어 게임</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Jua&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<style>
+  /* ===== 첫 화면 일러스트(lobby.jpg) 톤에 맞춘 공통 테마 ===== */
+  body{font-family:'Jua','Pretendard','Apple SD Gothic Neo','Malgun Gothic',system-ui,sans-serif;font-synthesis:none;min-height:100vh;
+    color:#34483f;
+    background:linear-gradient(135deg,#bfe9f5 0%,#d9f7c8 50%,#ffe9b8 100%) fixed;
+    overflow-x:hidden;-webkit-tap-highlight-color:transparent}
+  .blob{display:none}
+  .logo{font-size:1.5rem;color:#fff;-webkit-text-stroke:6px #1f6b3a;paint-order:stroke fill;letter-spacing:.02em;text-shadow:0 3px 0 #1f6b3a}
+  .logo b{color:#fff3d6;-webkit-text-stroke:6px #8a5a2b;text-shadow:0 3px 0 #8a5a2b;font-weight:400}
+  .text-violet-600,.text-violet-500{color:#1f8a4c !important}
+  .bg-violet-500{background:#2fa84f !important}
+  .ring-violet-300,.ring-violet-400{--tw-ring-color:#6fcf7f !important}
+  .from-pink-500{--tw-gradient-from:#f59e0b !important}.to-violet-500{--tw-gradient-to:#2fa84f !important}
+  .from-emerald-400{--tw-gradient-from:#8be05a !important}
+  /* ===== 로비(첫 화면) ===== */
+  .lobby-layer{position:fixed;inset:0;z-index:20;overflow:auto;display:flex;background:linear-gradient(135deg,#bfe9f5,#d9f7c8,#ffe9b8)}
+  .stage{position:relative;flex:none;margin:auto;width:min(100vw,calc(100vh*1.7902));aspect-ratio:1024/572;
+    background:url('lobby.jpg') center/100% 100% no-repeat;container-type:inline-size}
+  /* 이미지 속 흐릿한 패널(가로 36~64%, 세로 43~87%) 위에 정확히 겹쳐 실제 입력 UI를 배치 */
+  .lform{position:absolute;left:35.6%;top:42.6%;width:28.8%;height:44.8%;display:flex;flex-direction:column;justify-content:center;gap:2.2cqw;
+    padding:2cqw 2.4cqw;border-radius:2.4cqw;background:rgba(255,255,255,.93);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+    border:1px solid rgba(255,255,255,.95);box-shadow:0 1cqw 3cqw rgba(60,120,90,.25)}
+  .lform .inp{border-radius:9999px;background:#fff;border:1px solid #dfe8e3;text-align:center;font-size:max(1.5cqw,12px);padding:1cqw 1rem;min-height:0}
+  .lform .btn{border-radius:9999px;font-size:max(1.7cqw,13px);padding:1cqw 1rem;min-height:0;display:flex;align-items:center;justify-content:center;gap:.4rem}
+  .lock-btn{position:absolute;left:92.5%;top:1.76cqw;width:5cqw;height:5cqw;min-width:44px;min-height:44px;border-radius:1rem;background:transparent;cursor:pointer}
+  .lock-btn:hover{background:rgba(255,255,255,.25)}
+  .mode-tag{position:absolute;left:1.5cqw;bottom:1.2cqw;font-size:max(1.1cqw,11px);background:rgba(255,255,255,.75);border-radius:9999px;padding:.2rem .7rem;color:#34483f}
+  @media (max-aspect-ratio:1/1){
+    .stage{width:100%;max-width:640px;margin:0 auto;aspect-ratio:auto;background:none;padding-bottom:2rem}
+    .stage::before{content:'';display:block;width:100%;aspect-ratio:1024/400;background:url('lobby.jpg') center top/100% auto no-repeat}
+    .lform{position:relative;left:auto;top:auto;width:88%;height:auto;margin:-1rem auto 0;gap:12px;padding:16px;border-radius:1.6rem}
+    .lform .inp{font-size:16px}.lform .btn{font-size:17px}
+    .mode-tag{position:static;display:inline-block;margin:.8rem 0 0 1rem}
+  }
+  .glass{background:rgba(255,255,255,.55);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+    border:1px solid rgba(255,255,255,.75);box-shadow:0 8px 32px rgba(120,130,180,.22)}
+  .glass-red{background:rgba(255,120,130,.38);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+    border:1px solid rgba(255,180,185,.9);box-shadow:0 8px 40px rgba(255,60,80,.35)}
+  .glass-blue{background:rgba(150,200,255,.35);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+    border:1px solid rgba(255,255,255,.8);box-shadow:0 8px 32px rgba(80,140,255,.28)}
+  .btn{border-radius:1rem;font-weight:800;padding:.85rem 1.25rem;transition:transform .12s,box-shadow .12s,opacity .12s;
+    box-shadow:0 4px 14px rgba(100,110,170,.25);min-height:48px}
+  .btn:active{transform:scale(.96)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn{border-radius:9999px;text-shadow:0 1px 2px rgba(0,0,0,.25)}
+  .btn-primary{background:linear-gradient(#5fb8ff,#1f7be0);color:#fff;border:2px solid #bfe3ff}
+  .btn-green{background:linear-gradient(#8be05a,#2f9e44);color:#fff;border:2px solid #c6f2a5}
+  .btn-ghost{text-shadow:none}
+  .btn-red{background:linear-gradient(135deg,#ff7b8a,#ff4d6d);color:#fff}
+  .btn-ghost{background:rgba(255,255,255,.7);color:#4b5280}
+  .inp{width:100%;border-radius:1rem;padding:.85rem 1rem;background:rgba(255,255,255,.75);border:1px solid rgba(255,255,255,.9);
+    outline:none;font-size:1rem;color:#333}
+  .inp:focus{box-shadow:0 0 0 3px rgba(124,156,255,.5)}
+  @keyframes pop{0%{transform:scale(.3) rotate(-8deg);opacity:0}70%{transform:scale(1.12) rotate(2deg);opacity:1}100%{transform:scale(1) rotate(0)}}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+  @keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}
+  @keyframes pulseRed{0%,100%{box-shadow:0 8px 40px rgba(255,60,80,.35)}50%{box-shadow:0 8px 60px rgba(255,30,60,.8)}}
+  @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+  .a-pop{animation:pop .7s cubic-bezier(.2,.9,.3,1.2) both}
+  .a-up{animation:fadeUp .6s ease both}
+  .a-shake{animation:shake .5s ease 2}
+  .a-pulse{animation:pulseRed 1.2s ease infinite}
+  .a-float{animation:float 2.5s ease-in-out infinite}
+  .hidden-until{opacity:0}
+  .voted{outline:4px solid #7c9cff;transform:scale(1.03)}
+  .scroll-y{max-height:60vh;overflow-y:auto}
+</style>
+</head>
+<body class="text-slate-700">
+<div class="blob" style="width:320px;height:320px;background:#ffb3d1;top:-80px;left:-80px"></div>
+<div class="blob" style="width:360px;height:360px;background:#b3d1ff;bottom:-100px;right:-100px"></div>
+<div class="blob" style="width:260px;height:260px;background:#c3f5d9;top:40%;left:55%"></div>
+
+<div id="app" class="relative z-10 max-w-3xl mx-auto px-4 py-5 min-h-screen">
+  <div id="topbar" class="flex items-center justify-between mb-4">
+    <div class="logo flex items-center gap-2"><span class="text-2xl" style="-webkit-text-stroke:0;text-shadow:none">🕵️</span><span>순우리말 <b>마피아</b></span></div>
+    <div class="flex items-center gap-2">
+      <span class="text-xs px-2.5 py-1 rounded-full glass font-bold text-slate-600">출처: 하모쌤</span>
+      <span id="modeBadge" class="text-xs px-2 py-1 rounded-full glass font-bold"></span>
+      <button id="adminBtn" class="glass rounded-full w-11 h-11 flex items-center justify-center" aria-label="교사 관리자"><i data-lucide="lock" class="w-5 h-5"></i></button>
+    </div>
+  </div>
+  <main id="screen"></main>
+</div>
+
+<!-- 모달 영역 -->
+<div id="modalRoot"></div>
+<button id="bgmBtn" class="fixed bottom-4 right-4 z-[60] glass rounded-full w-12 h-12 text-xl flex items-center justify-center" aria-label="배경음악 켜기/끄기" title="배경음악 켜기/끄기">🎵</button>
+
+<script>
+/* =====================================================================
+ * ★ Firebase 설정 (여기를 본인의 Firebase 프로젝트 값으로 교체하세요) ★
+ *  1) https://console.firebase.google.com 에서 프로젝트 생성
+ *  2) 빌드 > Realtime Database > 데이터베이스 만들기 (테스트 모드로 시작)
+ *  3) 프로젝트 설정 > 내 앱(웹) 에서 firebaseConfig 값을 복사하여 아래에 붙여넣기
+ *  ※ apiKey 가 "YOUR_API_KEY" 그대로면 '로컬 체험 모드'(같은 브라우저의 여러 탭끼리만 동기화)로 동작합니다.
+ * ===================================================================== */
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+  databaseURL: "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT_ID.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
+};
+const ADMIN_PASSWORD = "0000"; // 교사 관리자 비밀번호
+const TURN_SECONDS = 30;
+const MAX_PLAYERS = 8;
+
+/* ---------- 기본 고유어 데이터 ---------- */
+const DEFAULT_WORDS = [
+  {id:'w1',word:'시나브로',meaning:'모르는 사이에 조금씩 조금씩',hint:'시간/변화',example:'겨울이 가고 시나브로 봄이 다가왔다.',hanja:'점차(漸次)',foreign:'그라데이션(gradation)'},
+  {id:'w2',word:'윤슬',meaning:'햇빛이나 달빛에 비치어 반짝이는 잔물결',hint:'자연/빛',example:'강물 위에 윤슬이 반짝이며 눈부시게 빛났다.',hanja:'파광(波光)',foreign:'글리터(glitter)'},
+  {id:'w3',word:'가람',meaning:'강의 순우리말',hint:'물/지형',example:'가람 위로 작은 배 한 척이 천천히 지나갔다.',hanja:'강(江)',foreign:'리버(river)'},
+  {id:'w4',word:'도담도담',meaning:'어린아이가 탈 없이 잘 자라는 모양',hint:'성장/모습',example:'동생이 도담도담 자라서 벌써 유치원에 간다.',hanja:'성장(成長)',foreign:'그로잉(growing)'},
+  {id:'w5',word:'에누리',meaning:'값을 깎는 일',hint:'시장/물건',example:'시장 아주머니께서 에누리를 해 주셔서 싸게 샀다.',hanja:'할인(割引)',foreign:'디스카운트(discount)'},
+  {id:'w6',word:'온누리',meaning:'세상의 모든 곳',hint:'세상/공간',example:'새해의 밝은 빛이 온누리에 퍼졌다.',hanja:'세계(世界)',foreign:'월드(world)'},
+  {id:'w7',word:'미리내',meaning:'은하수를 이르는 순우리말',hint:'하늘/별',example:'캠핑장에서 올려다본 밤하늘에는 미리내가 흐르고 있었다.',hanja:'은하수(銀河水)',foreign:'갤럭시(galaxy)'},
+  {id:'w8',word:'아람',meaning:'밤이나 도토리 따위가 충분히 익어 저절로 떨어질 정도가 된 상태',hint:'가을/열매',example:'산길에서 아람이 벌어진 밤송이를 주웠다.',hanja:'성숙(成熟)',foreign:'라입(ripe)'},
+  {id:'w9',word:'나래',meaning:'날개를 문학적으로 이르는 말',hint:'새/하늘',example:'새들이 나래를 활짝 펴고 하늘 높이 날아올랐다.',hanja:'익(翼)',foreign:'윙(wing)'},
+  {id:'w10',word:'가온',meaning:'가운데의 순우리말',hint:'위치/중심',example:'우리 모둠의 가온에는 친구들의 생각을 모은 판이 놓여 있다.',hanja:'중앙(中央)',foreign:'센터(center)'},
+  {id:'w11',word:'다솜',meaning:'애틋한 사랑을 뜻하는 옛말',hint:'마음/감정',example:'할머니의 다솜 어린 손길이 따뜻했다.',hanja:'애정(愛情)',foreign:'러브(love)'},
+  {id:'w12',word:'보늬',meaning:'밤이나 도토리 따위의 속껍질',hint:'음식/껍질',example:'삶은 밤의 보늬를 벗기면 노란 속살이 나온다.',hanja:'내피(內皮)',foreign:'스킨(skin)'},
+  {id:'w13',word:'산들바람',meaning:'시원하고 가볍게 살랑살랑 부는 바람',hint:'날씨/바람',example:'산들바람이 불어와 땀을 식혀 주었다.',hanja:'미풍(微風)',foreign:'브리즈(breeze)'},
+  {id:'w14',word:'여울',meaning:'강이나 바다의 바닥이 얕거나 좁아 물살이 세게 흐르는 곳',hint:'물/지형',example:'아이들은 여울에서 물고기를 구경했다.',hanja:'급류(急流)',foreign:'래피드(rapids)'},
+  {id:'w15',word:'마루',meaning:'산이나 지붕 따위의 꼭대기를 이르는 말',hint:'산/높이',example:'산마루에 올라서자 마을이 한눈에 내려다보였다.',hanja:'정상(頂上)',foreign:'피크(peak)'},
+  {id:'w16',word:'슬기',meaning:'사물의 이치를 빨리 깨닫고 일을 바르게 처리하는 능력',hint:'생각/능력',example:'우리 조상들은 슬기를 모아 어려움을 이겨냈다.',hanja:'지혜(智慧)',foreign:'위즈덤(wisdom)'},
+  {id:'w17',word:'나비잠',meaning:'갓난아이가 두 팔을 머리 위로 벌리고 자는 잠',hint:'아기/잠',example:'아기가 나비잠을 자는 모습이 참 귀여웠다.',hanja:'수면(睡眠)',foreign:'슬리핑(sleeping)'},
+  {id:'w18',word:'하늬바람',meaning:'서쪽에서 불어오는 바람',hint:'날씨/방향',example:'가을 들판에 하늬바람이 불어 벼가 출렁였다.',hanja:'서풍(西風)',foreign:'웨스트윈드(west wind)'},
+  {id:'w19',word:'늘품',meaning:'앞으로 좋게 발전할 가능성이 있는 품질이나 소질',hint:'미래/가능성',example:'그 아이는 늘품이 있어 앞날이 기대된다.',hanja:'잠재력(潛在力)',foreign:'포텐셜(potential)'},
+  {id:'w20',word:'아라',meaning:'바다의 옛 순우리말',hint:'물/자연',example:'아라 너머로 붉은 해가 떠오르고 있었다.',hanja:'해양(海洋)',foreign:'오션(ocean)'},
+  {id:'w21',word:'아리땁다',meaning:'보기에 사랑스럽고 곱다',hint:'모습/느낌',example:'아리따운 꽃들이 화단에 가득 피었다.',hanja:'미려(美麗)',foreign:'뷰티풀(beautiful)'}
+];
+const WORDS_VERSION='2'; // 기본 단어가 늘어나면 올려서 기존 저장소에도 새 단어를 병합합니다
+function mergeDefaults(list){
+  const ids=new Set(list.map(w=>w.id)), added=[];
+  DEFAULT_WORDS.forEach(w=>{ if(!ids.has(w.id)){ list.push(w); added.push(w); } });
+  return added;
+}
+
+/* ---------- 유틸 ---------- */
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const rnd = n => Math.floor(Math.random()*n);
+const shuffle = a => { a = a.slice(); for(let i=a.length-1;i>0;i--){const j=rnd(i+1);[a[i],a[j]]=[a[j],a[i]];} return a; };
+const AVATARS = ['🐶','🐱','🐰','🦊','🐻','🐼','🐯','🐸','🦁','🐵','🐧','🦄'];
+const COLORS = ['#ffd1dc','#d1e8ff','#d4f5d0','#fff3c4','#e6d4ff','#ffe0c2','#c8f2f2','#fdd6f0'];
+function refreshIcons(){ if(window.lucide) lucide.createIcons(); }
+function toast(msg){
+  const t=document.createElement('div');
+  t.className='fixed left-1/2 -translate-x-1/2 bottom-8 glass rounded-2xl px-5 py-3 font-bold z-[100] a-up';
+  t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t.remove(),2400);
+}
+function pathGet(obj,path){ return path.split('/').filter(Boolean).reduce((o,k)=>(o==null?undefined:o[k]),obj); }
+function pathSet(obj,path,val){
+  const ks=path.split('/').filter(Boolean); let o=obj;
+  for(let i=0;i<ks.length-1;i++){ if(typeof o[ks[i]]!=='object'||o[ks[i]]===null) o[ks[i]]={}; o=o[ks[i]]; }
+  if(val===null||val===undefined) delete o[ks[ks.length-1]]; else o[ks[ks.length-1]]=val;
+}
+
+/* ---------- 효과음 ---------- */
+let audioCtx;
+function tone(freq,dur,type='sine',when=0,vol=.15){
+  try{
+    audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state==='suspended') audioCtx.resume();
+    const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.type=type; o.frequency.value=freq; g.gain.value=vol;
+    o.connect(g); g.connect(audioCtx.destination);
+    const t=audioCtx.currentTime+when; o.start(t);
+    g.gain.exponentialRampToValueAtTime(.001,t+dur); o.stop(t+dur);
+  }catch(e){}
+}
+const sfx = {
+  warn(){ for(let i=0;i<4;i++){ tone(880,.18,'square',i*.25,.12); tone(440,.18,'square',i*.25+.12,.12);} },
+  ok(){ tone(660,.15,'sine',0); tone(880,.2,'sine',.15); },
+  tick(){ tone(1000,.08,'triangle',0,.1); },
+  win(){ [523,659,784,1047].forEach((f,i)=>tone(f,.25,'sine',i*.13)); },
+  lose(){ [400,330,260].forEach((f,i)=>tone(f,.3,'sawtooth',i*.16,.1)); },
+  hover(){ tone(1200,.07,'sine',0,.05); },
+  click(){ tone(700,.07,'triangle',0,.12); tone(1050,.12,'triangle',.06,.1); }
+};
+
+/* ---------- 배경음악 (WebAudio로 만든 잔잔한 루프, 켜기/끄기 가능) ---------- */
+const BGM = {
+  on: localStorage.getItem('sw_bgm')!=='off', gain:null, timer:null, next:0, step:0,
+  melody:[523,659,784,659, 880,784,659,523, 587,659,784,880, 784,659,587,523,
+          523,784,880,784, 659,587,523,587, 659,784,880,1047, 880,784,659,784],
+  bass:[130.8,110,87.3,98],
+  note(f,t,d,type,v){
+    const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.type=type; o.frequency.value=f; o.connect(g); g.connect(this.gain);
+    g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(v,t+.02); g.gain.exponentialRampToValueAtTime(.0001,t+d);
+    o.start(t); o.stop(t+d+.05);
+  },
+  sched(){
+    while(this.next < audioCtx.currentTime+.4){
+      const s=this.step%32, t=this.next;
+      this.note(this.melody[s],t,.3,'sine',.5);
+      if(s%4===0) this.note(this.bass[Math.floor(s/8)%4]*(s%8===4?2:1),t,.55,'triangle',.45);
+      this.next+=.3; this.step++;
+    }
+  },
+  start(){
+    if(!this.on || this.timer) return;
+    try{
+      audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
+      if(audioCtx.state==='suspended') audioCtx.resume();
+      if(!this.gain){ this.gain=audioCtx.createGain(); this.gain.connect(audioCtx.destination); }
+      this.gain.gain.cancelScheduledValues(audioCtx.currentTime); this.gain.gain.setValueAtTime(.12,audioCtx.currentTime);
+      this.next=audioCtx.currentTime+.1; this.timer=setInterval(()=>this.sched(),120);
+    }catch(e){}
+  },
+  stop(){
+    if(this.timer){ clearInterval(this.timer); this.timer=null; }
+    if(this.gain) this.gain.gain.setTargetAtTime(0,audioCtx.currentTime,.05);
+  },
+  toggle(){
+    this.on=!this.on; localStorage.setItem('sw_bgm',this.on?'on':'off');
+    this.on?this.start():this.stop(); this.paint();
+  },
+  paint(){ const b=document.getElementById('bgmBtn'); if(b){ b.textContent=this.on?'🎵':'🔇'; b.style.opacity=this.on?1:.7; } }
+};
+document.getElementById('bgmBtn').onclick=()=>BGM.toggle();
+BGM.paint();
+// 브라우저 정책상 첫 터치/클릭 이후에 음악이 시작됩니다
+['pointerdown','keydown'].forEach(ev=>document.addEventListener(ev,()=>BGM.start(),{once:false}));
+// 버튼 효과음: 로비에서는 마우스를 올리거나 터치만 해도 소리, 모든 화면에서 버튼 클릭음
+let lastHover=null;
+document.addEventListener('pointerover',e=>{
+  const el=e.target.closest && e.target.closest('.lobby-layer button, .lobby-layer input');
+  if(el && el!==lastHover){ sfx.hover(); } lastHover=el||null;
+});
+document.addEventListener('pointerdown',e=>{
+  if(e.target.closest && e.target.closest('button:not(#bgmBtn), .lobby-layer input')) sfx.click();
+});
+
+/* =====================================================================
+ * DB 어댑터 : Firebase 또는 로컬(localStorage) 모드
+ * ===================================================================== */
+const useFirebase = firebaseConfig.apiKey && firebaseConfig.apiKey !== 'YOUR_API_KEY' && window.firebase;
+let fbDb = null;
+if(useFirebase){
+  try{ firebase.initializeApp(firebaseConfig); fbDb = firebase.database(); }
+  catch(e){ console.error(e); }
+}
+const LOCAL_KEY='soonwoori_local_db';
+const localListeners=[];
+const readLocal=()=>{ try{return JSON.parse(localStorage.getItem(LOCAL_KEY))||{};}catch(e){return {};} };
+function notifyLocal(){ const d=readLocal(); localListeners.forEach(l=>l.cb(pathGet(d,l.path)??null)); }
+window.addEventListener('storage',e=>{ if(e.key===LOCAL_KEY) notifyLocal(); });
+
+const DB = {
+  isFirebase: !!fbDb,
+  async get(path){
+    if(fbDb){ const s=await fbDb.ref(path).once('value'); return s.val(); }
+    return pathGet(readLocal(),path)??null;
+  },
+  async set(path,val){
+    if(fbDb) return fbDb.ref(path).set(val);
+    const d=readLocal(); pathSet(d,path,val); localStorage.setItem(LOCAL_KEY,JSON.stringify(d)); notifyLocal();
+  },
+  async update(path,obj){
+    if(fbDb) return fbDb.ref(path).update(obj);
+    const d=readLocal(); Object.keys(obj).forEach(k=>pathSet(d,path+'/'+k,obj[k]));
+    localStorage.setItem(LOCAL_KEY,JSON.stringify(d)); notifyLocal();
+  },
+  async remove(path){ return this.set(path,null); },
+  listen(path,cb){
+    if(fbDb){ const r=fbDb.ref(path); const h=r.on('value',s=>cb(s.val())); return ()=>r.off('value',h); }
+    const l={path,cb}; localListeners.push(l); setTimeout(()=>cb(pathGet(readLocal(),path)??null),0);
+    return ()=>{ const i=localListeners.indexOf(l); if(i>=0) localListeners.splice(i,1); };
+  }
+};
+
+/* =====================================================================
+ * 상태
+ * ===================================================================== */
+const S = {
+  view:'lobby',          // lobby | room
+  pin:null, room:null,
+  words:[],
+  unsubRoom:null,
+  lastPhase:null, lastTurn:null,
+  myVote:null
+};
+const me = (()=>{
+  let id=sessionStorage.getItem('sw_id');
+  if(!id){ id='p'+Math.random().toString(36).slice(2,9); sessionStorage.setItem('sw_id',id); }
+  return {id, name:sessionStorage.getItem('sw_name')||''};
+})();
+
+/* ---------- 단어 풀 ---------- */
+function loadWordsLocal(){
+  try{ const w=JSON.parse(localStorage.getItem('soonwoori_words')); if(Array.isArray(w)&&w.length) return w; }catch(e){}
+  return DEFAULT_WORDS.slice();
+}
+function saveWordsLocal(){ localStorage.setItem('soonwoori_words',JSON.stringify(S.words)); }
+S.words = loadWordsLocal();
+if(localStorage.getItem('soonwoori_ver')!==WORDS_VERSION){ mergeDefaults(S.words); saveWordsLocal(); }
+function initWordSync(){
+  DB.listen('words',val=>{
+    if(val===null){
+      // DB가 비어 있으면 현재 단어 풀(기본 데이터 포함)을 업로드
+      const obj={}; S.words.forEach(w=>obj[w.id]=w); DB.set('words',obj); localStorage.setItem('soonwoori_ver',WORDS_VERSION); return;
+    }
+    S.words = Object.values(val);
+    if(localStorage.getItem('soonwoori_ver')!==WORDS_VERSION){
+      // 새로 추가된 기본 고유어를 DB에도 한 번만 병합
+      mergeDefaults(S.words).forEach(w=>DB.set('words/'+w.id,w));
+      localStorage.setItem('soonwoori_ver',WORDS_VERSION);
+    }
+    saveWordsLocal();
+    if($('#adminModal')) renderAdminList();
+  });
+}
+
+/* =====================================================================
+ * 로비
+ * ===================================================================== */
+function renderLobby(){
+  $('#topbar').style.display='none';
+  $('#screen').innerHTML = `
+  <div class="lobby-layer">
+    <div class="stage">
+      <button id="lockBtn" class="lock-btn" aria-label="선생님 전용 관리자" title="선생님 전용"></button>
+      <div class="lform a-up">
+        <input id="nick" class="inp" maxlength="8" placeholder="닉네임 입력" value="${esc(me.name)}" autocomplete="off">
+        <input id="pin" class="inp" inputmode="numeric" maxlength="4" placeholder="4자리 방 코드 (PIN)" autocomplete="off">
+        <button id="joinBtn" class="btn btn-green">게임 참여하기 <i data-lucide="log-in" class="w-5 h-5"></i></button>
+        <button id="createBtn" class="btn btn-primary">새 방 만들기</button>
+      </div>
+      <div class="mode-tag">${DB.isFirebase?'🟢 온라인(Firebase)':'🟡 로컬 체험 모드'} · 출처: 하모쌤</div>
+    </div>
+  </div>`;
+  $('#pin').addEventListener('input',e=>e.target.value=e.target.value.replace(/\D/g,''));
+  $('#joinBtn').onclick=joinRoom;
+  $('#createBtn').onclick=createRoom;
+  $('#lockBtn').onclick=openPwModal;
+  refreshIcons();
+}
+function readNick(){
+  const n=$('#nick').value.trim();
+  if(!n){ toast('닉네임을 입력해 주세요 ✏️'); $('#nick').focus(); return null; }
+  me.name=n; sessionStorage.setItem('sw_name',n); return n;
+}
+function playerObj(name){
+  return {name, avatar:AVATARS[rnd(AVATARS.length)], color:COLORS[rnd(COLORS.length)], joined:Date.now()};
+}
+async function createRoom(){
+  const name=readNick(); if(!name) return;
+  $('#createBtn').disabled=true;
+  try{
+    let pin, tries=0;
+    do{ pin=String(1000+rnd(9000)); tries++; } while((await DB.get('rooms/'+pin)) && tries<20);
+    await DB.set('rooms/'+pin,{host:me.id,phase:'lobby',createdAt:Date.now(),players:{[me.id]:playerObj(name)}});
+    enterRoom(pin);
+  }catch(e){ console.error(e); toast('방 만들기 실패: 네트워크/Firebase 설정을 확인하세요'); $('#createBtn').disabled=false; }
+}
+async function joinRoom(){
+  const name=readNick(); if(!name) return;
+  const pin=$('#pin').value.trim();
+  if(pin.length!==4){ toast('방 코드 4자리를 입력해 주세요 🔢'); return; }
+  try{
+    const room=await DB.get('rooms/'+pin);
+    if(!room){ toast('존재하지 않는 방이에요 😢'); return; }
+    const players=room.players||{};
+    if(!players[me.id]){
+      if(room.phase!=='lobby'){ toast('이미 게임이 진행 중인 방이에요'); return; }
+      if(Object.keys(players).length>=MAX_PLAYERS){ toast(`최대 ${MAX_PLAYERS}명까지 입장할 수 있어요`); return; }
+      if(Object.values(players).some(p=>p.name===name)){ toast('같은 닉네임이 이미 있어요. 바꿔 주세요'); return; }
+      await DB.set(`rooms/${pin}/players/${me.id}`,playerObj(name));
+    }
+    enterRoom(pin);
+  }catch(e){ console.error(e); toast('입장 실패: 네트워크를 확인하세요'); }
+}
+function enterRoom(pin){
+  $('#topbar').style.display='flex';
+  S.view='room'; S.pin=pin; S.room=null; S.lastPhase=null; S.lastTurn=null; S.myVote=null;
+  if(S.unsubRoom) S.unsubRoom();
+  S.unsubRoom=DB.listen('rooms/'+pin,onRoomUpdate);
+}
+async function leaveRoom(){
+  const pin=S.pin, room=S.room;
+  if(S.unsubRoom){ S.unsubRoom(); S.unsubRoom=null; }
+  S.view='lobby'; S.pin=null; S.room=null;
+  try{
+    if(room && room.host===me.id) await DB.remove('rooms/'+pin);
+    else await DB.remove(`rooms/${pin}/players/${me.id}`);
+  }catch(e){}
+  renderLobby();
+}
+
+/* =====================================================================
+ * 방 상태 수신 & 렌더
+ * ===================================================================== */
+function playersOf(room){
+  return Object.entries(room.players||{}).map(([id,p])=>({id,...p})).sort((a,b)=>a.joined-b.joined);
+}
+function orderOf(room){ return room.order ? Object.values(room.order) : []; }
+const isHost = () => S.room && S.room.host===me.id;
+
+function onRoomUpdate(room){
+  if(S.view!=='room') return;
+  if(!room){
+    if(S.unsubRoom){S.unsubRoom();S.unsubRoom=null;}
+    S.view='lobby'; S.room=null; toast('방이 사라졌어요. 로비로 이동합니다'); renderLobby(); return;
+  }
+  if(!room.players || !room.players[me.id]){
+    // 내가 목록에서 빠졌다면 로비로
+    if(S.unsubRoom){S.unsubRoom();S.unsubRoom=null;}
+    S.view='lobby'; S.room=null; renderLobby(); return;
+  }
+  const prevPhase=S.lastPhase;
+  S.room=room;
+  if(room.phase==='lobby' || room.phase==='role') S.myVote=null;
+  S.myVote = (room.votes && room.votes[me.id]) || null;
+
+  // 방장: 모든 투표 완료 시 자동 결과 공개
+  if(isHost() && room.phase==='vote'){
+    const n=Object.keys(room.players).length, v=Object.keys(room.votes||{}).length;
+    if(v>=n) DB.update('rooms/'+S.pin,{phase:'result',resultAt:Date.now()});
+  }
+  renderRoom(prevPhase!==room.phase);
+}
+
+function renderRoom(phaseChanged){
+  const r=S.room;
+  const turnKey = r.phase==='speak' ? r.turnIdx : null;
+  const needFull = phaseChanged || S.lastPhase===null || r.phase==='lobby' || r.phase==='vote' || r.phase==='role' || S.lastTurn!==turnKey || r.phase==='speak';
+  S.lastPhase=r.phase; S.lastTurn=turnKey;
+  if(!needFull) return;
+  const map={lobby:viewWaiting,role:viewRole,speak:viewSpeak,vote:viewVote,result:viewResult};
+  (map[r.phase]||viewWaiting)(phaseChanged);
+  refreshIcons();
+}
+
+function roomHeader(title){
+  return `<div class="flex items-center justify-between mb-4">
+    <div class="glass rounded-2xl px-4 py-2 font-extrabold flex items-center gap-2"><i data-lucide="hash" class="w-4 h-4"></i>방 코드 <span class="text-violet-600 tracking-widest text-lg">${esc(S.pin)}</span></div>
+    <button id="leaveBtn" class="btn btn-ghost !py-2 !min-h-0 text-sm flex items-center gap-1"><i data-lucide="log-out" class="w-4 h-4"></i>나가기</button>
+  </div>${title?`<h2 class="text-2xl font-extrabold text-center mb-4">${title}</h2>`:''}`;
+}
+function bindLeave(){ const b=$('#leaveBtn'); if(b) b.onclick=()=>{ if(confirm(isHost()?'방장이 나가면 방이 사라져요. 나갈까요?':'방에서 나갈까요?')) leaveRoom(); }; }
+function avatarChip(p,extra=''){
+  return `<div class="glass rounded-2xl p-3 flex flex-col items-center ${extra}">
+    <div class="w-14 h-14 rounded-full flex items-center justify-center text-3xl shadow-inner" style="background:${p.color}">${p.avatar}</div>
+    <div class="mt-2 font-extrabold text-sm text-center break-all">${esc(p.name)}</div>
+    ${S.room.host===p.id?'<div class="text-xs font-bold text-amber-600 mt-0.5">👑 방장</div>':''}
+  </div>`;
+}
+
+/* ---------- 화면 3: 대기실 ---------- */
+function viewWaiting(){
+  const r=S.room, ps=playersOf(r), host=isHost();
+  $('#screen').innerHTML = `<div class="a-up">${roomHeader('게임 대기실')}
+    <div class="glass rounded-2xl p-4 mb-4 text-center font-bold">친구들에게 방 코드 <span class="text-violet-600 text-xl tracking-widest">${esc(S.pin)}</span> 를 알려 주세요!</div>
+    <div class="grid grid-cols-3 sm:grid-cols-4 gap-3 mb-5">${ps.map(p=>avatarChip(p,p.id===me.id?'ring-4 ring-violet-300':'')).join('')}</div>
+    <div class="text-center font-bold text-slate-500 mb-3">현재 ${ps.length}명 · ${ps.length<3?'3명 이상 모이면 시작할 수 있어요':'게임을 시작할 수 있어요!'}</div>
+    ${host?`<button id="startBtn" class="btn btn-primary w-full text-lg flex items-center justify-center gap-2" ${ps.length<3?'disabled':''}><i data-lucide="play" class="w-5 h-5"></i>게임 시작</button>
+      ${ps.length<3?'<button id="forceBtn" class="w-full mt-2 text-xs text-slate-400 underline">(테스트용) 2명 이하로 시작하기</button>':''}`
+      :`<div class="glass rounded-2xl p-4 text-center font-bold animate-pulse">방장이 시작하기를 기다리는 중...</div>`}
+  </div>`;
+  bindLeave();
+  if(host){
+    $('#startBtn').onclick=startGame;
+    const f=$('#forceBtn'); if(f) f.onclick=()=>{ if(ps.length<2){toast('최소 2명이 필요해요');return;} startGame(); };
+  }
+}
+async function startGame(){
+  const ps=playersOf(S.room);
+  const pool=S.words.filter(w=>w&&w.word);
+  if(!pool.length){ toast('등록된 고유어가 없어요. 선생님께 문의하세요'); return; }
+  const w=pool[rnd(pool.length)];
+  const liar=ps[rnd(ps.length)].id;
+  const order=shuffle(ps.map(p=>p.id));
+  await DB.update('rooms/'+S.pin,{
+    phase:'role', word:w, liar, order, turnIdx:0, turnEnd:null, votes:null, resultAt:null, round:(S.room.round||0)+1
+  });
+}
+
+/* ---------- 화면 3: 역할 확인 ---------- */
+function viewRole(changed){
+  const r=S.room, w=r.word, liar=r.liar===me.id, host=isHost();
+  if(liar){
+    $('#screen').innerHTML=`<div>${roomHeader('역할 확인')}
+      <div class="glass-red a-shake a-pulse rounded-2xl p-6 sm:p-8 text-center">
+        <div class="text-7xl mb-2 a-pop">🚨</div>
+        <div class="text-lg font-bold text-rose-900">당신은</div>
+        <div class="text-5xl font-extrabold text-rose-600 my-2 a-pop">[라이어]</div>
+        <p class="font-bold text-rose-900 leading-relaxed mt-3">고유어의 뜻을 모르는 척 정체를 숨기세요!<br>다른 친구들의 설명을 잘 듣고 눈치껏 따라 해 보세요.</p>
+        <div class="mt-5 inline-block glass rounded-2xl px-5 py-3 font-extrabold text-slate-700">💡 힌트 범주: <span class="text-rose-600 text-xl">[${esc(w.hint)}]</span></div>
+      </div>${roleFooter(host)}</div>`;
+    if(changed) sfx.warn();
+  }else{
+    $('#screen').innerHTML=`<div>${roomHeader('역할 확인')}
+      <div class="glass-blue a-up rounded-2xl p-6 sm:p-8 text-center">
+        <div class="text-7xl mb-2 a-pop">🛡️</div>
+        <div class="text-lg font-bold">당신은 <b class="text-sky-600">[시민]</b>입니다.</div>
+        <div class="mt-4 font-bold text-slate-500">이번 고유어</div>
+        <div class="text-5xl font-extrabold text-violet-600 my-1 a-pop">[${esc(w.word)}]</div>
+        <div class="mt-3 font-bold text-slate-500">뜻</div>
+        <div class="text-xl font-extrabold leading-snug">[${esc(w.meaning)}]</div>
+        <p class="mt-4 text-sm font-semibold text-slate-500">단어를 직접 말하지 않고 뜻으로 설명해야 해요. 라이어가 눈치채지 못하게 조심!</p>
+      </div>${roleFooter(host)}</div>`;
+    if(changed) sfx.ok();
+  }
+  bindLeave();
+  const b=$('#beginBtn'); if(b) b.onclick=()=>DB.update('rooms/'+S.pin,{phase:'speak',turnIdx:0,turnEnd:Date.now()+TURN_SECONDS*1000});
+}
+function roleFooter(host){
+  return host
+   ? `<button id="beginBtn" class="btn btn-primary w-full mt-4 text-lg flex items-center justify-center gap-2"><i data-lucide="mic" class="w-5 h-5"></i>모두 확인했어요! 발언 시작</button>`
+   : `<div class="glass rounded-2xl p-3 mt-4 text-center font-bold text-sm animate-pulse">내 역할을 확인했다면 방장이 시작하기를 기다려요 (화면을 친구에게 보여주지 마세요 🤫)</div>`;
+}
+
+/* ---------- 화면 4: 발언 ---------- */
+function viewSpeak(){
+  const r=S.room, order=orderOf(r), ps=playersOf(r), byId=Object.fromEntries(ps.map(p=>[p.id,p]));
+  const cur=byId[order[r.turnIdx]] || ps[0];
+  const mine=cur.id===me.id;
+  $('#screen').innerHTML=`<div class="a-up">${roomHeader('')}
+    <div class="glass rounded-2xl p-5 text-center">
+      <div class="text-sm font-extrabold text-slate-500">발언 순서 ${r.turnIdx+1} / ${order.length}</div>
+      <div class="w-24 h-24 mx-auto rounded-full flex items-center justify-center text-6xl my-3 a-float shadow-inner" style="background:${cur.color}">${cur.avatar}</div>
+      <div class="text-2xl font-extrabold">${mine?'🎤 내 차례예요!':esc(cur.name)+' 님의 차례'}</div>
+      <div class="mt-4"><div id="timerNum" class="text-6xl font-extrabold text-violet-600 tabular-nums">${TURN_SECONDS}</div>
+        <div class="h-3 rounded-full bg-white/70 mt-2 overflow-hidden"><div id="timerBar" class="h-full rounded-full bg-gradient-to-r from-emerald-400 to-violet-500" style="width:100%;transition:width .3s linear"></div></div></div>
+      <div class="mt-4 glass rounded-2xl p-3 font-bold text-sm sm:text-base">💬 단어를 직접 말하지 말고, 뜻을 담아 <b class="text-rose-500">한 문장</b>으로 설명하세요!</div>
+      ${mine?`<button id="nextTurn" class="btn btn-green mt-4 w-full flex items-center justify-center gap-2"><i data-lucide="check" class="w-5 h-5"></i>발언 끝!</button>`:''}
+    </div>
+    <div class="grid grid-cols-4 sm:grid-cols-6 gap-2 mt-4">
+      ${order.map((id,i)=>{const p=byId[id]; if(!p) return ''; const st=i<r.turnIdx?'opacity-50':(i===r.turnIdx?'ring-4 ring-violet-400':'');
+        return `<div class="glass rounded-xl p-2 text-center ${st}"><div class="text-2xl">${p.avatar}</div><div class="text-[11px] font-extrabold break-all">${i+1}. ${esc(p.name)}</div></div>`}).join('')}
+    </div>
+    ${isHost()?`<button id="skipVote" class="w-full mt-4 text-xs text-slate-500 underline">방장: 발언을 건너뛰고 바로 투표하기</button>`:''}
+  </div>`;
+  bindLeave();
+  const n=$('#nextTurn'); if(n) n.onclick=()=>advanceTurn(r.turnIdx);
+  const s=$('#skipVote'); if(s) s.onclick=()=>DB.update('rooms/'+S.pin,{phase:'vote',votes:null});
+  tickTimer();
+}
+async function advanceTurn(expectedIdx){
+  const r=S.room; if(!r||r.phase!=='speak'||r.turnIdx!==expectedIdx) return;
+  const total=orderOf(r).length;
+  if(expectedIdx+1<total) await DB.update('rooms/'+S.pin,{turnIdx:expectedIdx+1,turnEnd:Date.now()+TURN_SECONDS*1000});
+  else await DB.update('rooms/'+S.pin,{phase:'vote',votes:null,turnEnd:null});
+}
+let lastSec=null;
+function tickTimer(){
+  const r=S.room; if(!r||r.phase!=='speak'||!r.turnEnd) return;
+  const left=Math.max(0,r.turnEnd-Date.now()), sec=Math.ceil(left/1000);
+  const num=$('#timerNum'), bar=$('#timerBar');
+  if(num){
+    num.textContent=sec; bar.style.width=(left/(TURN_SECONDS*1000)*100)+'%';
+    num.classList.toggle('text-rose-500',sec<=5); num.classList.toggle('text-violet-600',sec>5);
+    if(sec<=5 && sec>0 && sec!==lastSec) sfx.tick();
+    lastSec=sec;
+  }
+  if(left<=0 && isHost()) advanceTurn(r.turnIdx);
+}
+setInterval(tickTimer,250);
+
+/* ---------- 화면 4: 투표 ---------- */
+function viewVote(){
+  const r=S.room, ps=playersOf(r), votes=r.votes||{}, host=isHost();
+  $('#screen').innerHTML=`<div class="a-up">${roomHeader('🗳️ 누가 라이어일까요?')}
+    <div class="glass rounded-2xl p-3 mb-4 text-center font-bold">가장 의심스러운 친구를 터치하세요! <span class="text-violet-600">(${Object.keys(votes).length}/${ps.length}명 투표 완료)</span></div>
+    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+      ${ps.map(p=>{const self=p.id===me.id, sel=S.myVote===p.id;
+        return `<button data-vote="${p.id}" ${self?'disabled':''} class="glass rounded-2xl p-4 flex flex-col items-center transition ${sel?'voted':''} ${self?'opacity-50':'active:scale-95'}">
+          <div class="w-16 h-16 rounded-full flex items-center justify-center text-4xl shadow-inner" style="background:${p.color}">${p.avatar}</div>
+          <div class="mt-2 font-extrabold break-all">${esc(p.name)}${self?' (나)':''}</div>
+          <div class="text-xs font-bold mt-1 ${sel?'text-violet-600':'text-slate-400'}">${sel?'✅ 내가 투표함':(votes[p.id]?'투표 완료':'고민 중...')}</div>
+        </button>`}).join('')}
+    </div>
+    ${host?`<button id="closeVote" class="btn btn-red w-full mt-5 flex items-center justify-center gap-2"><i data-lucide="gavel" class="w-5 h-5"></i>투표 마감하고 결과 보기</button>`:''}
+  </div>`;
+  bindLeave();
+  document.querySelectorAll('[data-vote]').forEach(b=>b.onclick=()=>{
+    DB.set(`rooms/${S.pin}/votes/${me.id}`,b.dataset.vote); sfx.ok();
+  });
+  const c=$('#closeVote'); if(c) c.onclick=()=>DB.update('rooms/'+S.pin,{phase:'result',resultAt:Date.now()});
+}
+
+/* ---------- 화면 5: 결과 ---------- */
+function tally(r){
+  const ps=playersOf(r), count={}; ps.forEach(p=>count[p.id]=0);
+  Object.values(r.votes||{}).forEach(t=>{ if(count[t]!==undefined) count[t]++; });
+  const max=Math.max(0,...Object.values(count));
+  const top=Object.keys(count).filter(id=>count[id]===max && max>0);
+  return {count,max,top};
+}
+function viewResult(changed){
+  const r=S.room, ps=playersOf(r), byId=Object.fromEntries(ps.map(p=>[p.id,p]));
+  const {count,max,top}=tally(r);
+  const liar=byId[r.liar]||{name:'(퇴장)',avatar:'❓',color:'#eee'};
+  const caught = top.length===1 && top[0]===r.liar;
+  const accused = top.length===1 ? byId[top[0]] : null;
+  const w=r.word;
+  $('#screen').innerHTML=`<div>${roomHeader('')}
+    <div class="glass rounded-2xl p-5 text-center a-up">
+      <div class="font-extrabold text-slate-500">🗳️ 투표 결과</div>
+      <div class="grid grid-cols-3 sm:grid-cols-4 gap-2 mt-3">
+        ${ps.map(p=>`<div class="rounded-xl p-2 ${p.id===top[0]&&top.length===1?'bg-amber-100/80 ring-2 ring-amber-400':'bg-white/50'}">
+          <div class="text-2xl">${p.avatar}</div><div class="text-xs font-extrabold break-all">${esc(p.name)}</div>
+          <div class="font-extrabold text-violet-600">${count[p.id]}표</div></div>`).join('')}
+      </div>
+      <div class="mt-4 font-bold hidden-until a-up" style="animation-delay:1s">
+        ${accused?`최다 득표자: <b class="text-amber-600">${esc(accused.name)}</b> (${max}표)`:'동점이라 지목된 사람이 없어요!'}
+      </div>
+    </div>
+
+    <div class="glass-red rounded-2xl p-6 mt-4 text-center hidden-until a-pop" style="animation-delay:2s">
+      <div class="text-6xl a-float">👑</div>
+      <div class="inline-block bg-rose-600 text-white font-extrabold px-4 py-1 rounded-full text-sm shadow my-2">🚨 진짜 라이어</div>
+      <div class="w-20 h-20 mx-auto rounded-full flex items-center justify-center text-5xl shadow-inner" style="background:${liar.color}">${liar.avatar}</div>
+      <div class="text-3xl font-extrabold text-rose-700 mt-2">${esc(liar.name)}${r.liar===me.id?' (나)':''}</div>
+      <div class="mt-3 text-xl font-extrabold ${caught?'text-emerald-700':'text-rose-900'}">${caught?'🎉 시민 승리! 라이어를 찾아냈어요!':'😈 라이어 승리! 끝까지 정체를 숨겼어요!'}</div>
+    </div>
+
+    <div id="learnWrap" class="hidden-until a-up mt-4" style="animation-delay:3.2s">
+      <div id="learnCard" class="glass rounded-2xl p-6 sm:p-8" style="background:rgba(255,255,255,.8)">
+        <div class="text-center">
+          <div class="inline-block text-xs font-extrabold px-3 py-1 rounded-full bg-violet-500 text-white">📚 오늘의 고유어 학습 카드</div>
+          <div class="text-5xl sm:text-6xl font-extrabold mt-3 bg-clip-text text-transparent bg-gradient-to-r from-pink-500 to-violet-500">${esc(w.word)}</div>
+        </div>
+        <div class="mt-5 rounded-2xl bg-sky-50/90 p-4"><div class="text-xs font-extrabold text-sky-600 mb-1">📖 사전적 뜻</div><div class="font-extrabold text-lg leading-snug">${esc(w.meaning)}</div></div>
+        <div class="mt-3 rounded-2xl bg-emerald-50/90 p-4">
+          <div class="text-xs font-extrabold text-emerald-600 mb-2">🔍 한자어 · 외래어 대조표</div>
+          <table class="w-full text-center text-sm font-bold">
+            <thead><tr class="text-slate-500"><th class="pb-1">고유어</th><th class="pb-1">한자어</th><th class="pb-1">외래어</th></tr></thead>
+            <tbody><tr><td class="text-violet-600 font-extrabold">${esc(w.word)}</td><td>${esc(w.hanja||'-')}</td><td>${esc(w.foreign||'-')}</td></tr></tbody>
+          </table>
+        </div>
+        <div class="mt-3 rounded-2xl bg-amber-50/90 p-4"><div class="text-xs font-extrabold text-amber-600 mb-1">✏️ 실생활 예문</div><div class="font-bold leading-relaxed">“${esc(w.example||'')}”</div></div>
+        <div class="mt-3 text-center text-xs font-bold text-slate-400">💡 힌트 범주: ${esc(w.hint)} · 순우리말 마피아 · 출처: 하모쌤</div>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-${isHost()?3:2} gap-3 mt-4">
+        <button id="saveBtn" class="btn btn-primary flex items-center justify-center gap-2"><i data-lucide="download" class="w-5 h-5"></i>화면 캡처/저장하기</button>
+        ${isHost()?`<button id="againBtn" class="btn btn-green flex items-center justify-center gap-2"><i data-lucide="rotate-ccw" class="w-5 h-5"></i>같은 방에서 다시 하기</button>`:''}
+        <button id="homeBtn" class="btn btn-ghost flex items-center justify-center gap-2"><i data-lucide="home" class="w-5 h-5"></i>로비로 돌아가기</button>
+      </div>
+    </div>
+  </div>`;
+  bindLeave();
+  $('#homeBtn').onclick=leaveRoom;
+  const a=$('#againBtn'); if(a) a.onclick=()=>DB.update('rooms/'+S.pin,{phase:'lobby',votes:null,word:null,liar:null,order:null,turnEnd:null});
+  $('#saveBtn').onclick=saveCard;
+  if(changed){
+    setTimeout(()=>{ caught?sfx.win():sfx.lose(); },2000);
+    setTimeout(()=>{
+      if(caught){
+        confetti({particleCount:140,spread:90,origin:{y:.5}});
+        setTimeout(()=>confetti({particleCount:100,angle:60,spread:70,origin:{x:0,y:.7}}),300);
+        setTimeout(()=>confetti({particleCount:100,angle:120,spread:70,origin:{x:1,y:.7}}),300);
+      }
+    },2000);
+  }
+}
+async function saveCard(){
+  const el=$('#learnCard');
+  if(!window.html2canvas){ toast('캡처 도구를 불러오지 못했어요. 스크린샷을 이용해 주세요 📸'); return; }
+  try{
+    const canvas=await html2canvas(el,{backgroundColor:'#f3f0ff',scale:2});
+    const a=document.createElement('a');
+    a.download=`고유어카드_${S.room.word.word}.png`; a.href=canvas.toDataURL('image/png'); a.click();
+    toast('학습 카드를 저장했어요 ✅');
+  }catch(e){ toast('저장 실패: 스크린샷을 이용해 주세요 📸'); }
+}
+
+/* =====================================================================
+ * 교사용 관리자 (비밀번호 모달 + 고유어 대시보드)
+ * ===================================================================== */
+function closeModal(){ $('#modalRoot').innerHTML=''; }
+function openPwModal(){
+  $('#modalRoot').innerHTML=`<div id="pwModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/30 backdrop-blur-sm">
+    <div class="glass rounded-2xl p-6 w-full max-w-sm a-pop" style="background:rgba(255,255,255,.8)">
+      <div class="text-center text-4xl mb-1">🔐</div>
+      <h3 class="text-xl font-extrabold text-center mb-3">선생님 확인</h3>
+      <input id="pwInp" type="password" inputmode="numeric" class="inp text-center text-xl tracking-widest" placeholder="비밀번호">
+      <div id="pwErr" class="text-rose-500 text-sm font-bold text-center mt-2 h-5"></div>
+      <div class="grid grid-cols-2 gap-2 mt-2">
+        <button id="pwCancel" class="btn btn-ghost">취소</button><button id="pwOk" class="btn btn-primary">확인</button>
+      </div>
+    </div></div>`;
+  const inp=$('#pwInp'); inp.focus();
+  const submit=()=>{
+    if(inp.value===ADMIN_PASSWORD){ openAdmin(); }
+    else{ $('#pwErr').textContent='비밀번호가 올바르지 않아요'; inp.value=''; inp.parentElement.classList.remove('a-shake'); void inp.offsetWidth; inp.parentElement.classList.add('a-shake'); }
+  };
+  $('#pwOk').onclick=submit; $('#pwCancel').onclick=closeModal;
+  inp.addEventListener('keydown',e=>{ if(e.key==='Enter') submit(); });
+}
+function openAdmin(){
+  $('#modalRoot').innerHTML=`<div id="adminModal" class="fixed inset-0 z-50 flex items-center justify-center p-3 bg-slate-900/30 backdrop-blur-sm">
+    <div class="glass rounded-2xl w-full max-w-2xl max-h-[92vh] flex flex-col a-up" style="background:rgba(255,255,255,.85)">
+      <div class="flex items-center justify-between p-4 border-b border-white/70">
+        <h3 class="text-xl font-extrabold">📋 고유어 관리 대시보드</h3>
+        <button id="admClose" class="w-10 h-10 rounded-full glass flex items-center justify-center"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div class="overflow-y-auto p-4 space-y-4">
+        <div class="rounded-2xl bg-white/60 p-4 space-y-2">
+          <div class="font-extrabold">➕ 새 고유어 추가</div>
+          <input id="fWord" class="inp" placeholder="고유어(단어) 예) 마루">
+          <input id="fMeaning" class="inp" placeholder="뜻풀이">
+          <input id="fHint" class="inp" placeholder="라이어 힌트(상위 개념) 예) 집/공간">
+          <input id="fExample" class="inp" placeholder="교과서 실생활 예문">
+          <div class="grid grid-cols-2 gap-2">
+            <input id="fHanja" class="inp" placeholder="(선택) 대응 한자어">
+            <input id="fForeign" class="inp" placeholder="(선택) 대응 외래어">
+          </div>
+          <button id="fAdd" class="btn btn-green w-full">추가하기</button>
+        </div>
+        <div><div class="font-extrabold mb-2">현재 등록된 고유어 <span id="wCount" class="text-violet-600"></span></div><div id="wList" class="space-y-2"></div></div>
+        <button id="fReset" class="text-xs text-slate-500 underline">기본 고유어로 초기화</button>
+      </div>
+    </div></div>`;
+  $('#admClose').onclick=closeModal;
+  $('#fAdd').onclick=addWord;
+  $('#fReset').onclick=async()=>{
+    if(!confirm('모든 고유어를 지우고 기본 고유어로 되돌릴까요?')) return;
+    S.words=DEFAULT_WORDS.slice(); saveWordsLocal();
+    const obj={}; S.words.forEach(w=>obj[w.id]=w); await DB.set('words',obj); renderAdminList(); toast('초기화했어요');
+  };
+  renderAdminList(); refreshIcons();
+}
+function renderAdminList(){
+  const l=$('#wList'); if(!l) return;
+  $('#wCount').textContent=`(${S.words.length}개)`;
+  l.innerHTML=S.words.map(w=>`<div class="rounded-2xl bg-white/70 p-3 flex gap-3 items-start">
+    <div class="flex-1 min-w-0">
+      <div class="flex flex-wrap items-center gap-2"><span class="text-lg font-extrabold text-violet-600">${esc(w.word)}</span>
+        <span class="text-xs font-bold bg-rose-100 text-rose-600 rounded-full px-2 py-0.5">힌트: ${esc(w.hint)}</span></div>
+      <div class="text-sm font-bold mt-1">${esc(w.meaning)}</div>
+      <div class="text-xs text-slate-500 mt-1">“${esc(w.example||'')}”</div>
+      ${(w.hanja||w.foreign)?`<div class="text-xs text-slate-400 mt-1">한자어: ${esc(w.hanja||'-')} · 외래어: ${esc(w.foreign||'-')}</div>`:''}
+    </div>
+    <button data-del="${esc(w.id)}" class="w-9 h-9 shrink-0 rounded-full bg-rose-100 text-rose-500 flex items-center justify-center" aria-label="삭제">🗑️</button>
+  </div>`).join('') || '<div class="text-center text-slate-400 font-bold py-4">등록된 고유어가 없어요</div>';
+  l.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('이 고유어를 삭제할까요?')) return;
+    const id=b.dataset.del; S.words=S.words.filter(w=>w.id!==id); saveWordsLocal();
+    await DB.remove('words/'+id);
+    if(S.words.length===0){ /* 비어 있으면 리스너가 기본값을 다시 채우지 않도록 빈 표시 */ }
+    renderAdminList();
+  });
+}
+async function addWord(){
+  const g=id=>$('#'+id).value.trim();
+  const w={id:'w'+Date.now().toString(36),word:g('fWord'),meaning:g('fMeaning'),hint:g('fHint'),example:g('fExample'),hanja:g('fHanja'),foreign:g('fForeign')};
+  if(!w.word||!w.meaning||!w.hint||!w.example){ toast('단어·뜻풀이·힌트·예문을 모두 입력해 주세요'); return; }
+  if(S.words.some(x=>x.word===w.word)){ toast('이미 등록된 단어예요'); return; }
+  S.words.push(w); saveWordsLocal();
+  try{ await DB.set('words/'+w.id,w); }catch(e){ toast('Firebase 저장 실패 (로컬에는 저장됨)'); }
+  ['fWord','fMeaning','fHint','fExample','fHanja','fForeign'].forEach(id=>$('#'+id).value='');
+  renderAdminList(); toast(`‘${w.word}’ 추가 완료! 바로 게임에 반영돼요 ✅`);
+}
+
+/* =====================================================================
+ * 시작
+ * ===================================================================== */
+$('#adminBtn').onclick=openPwModal;
+$('#topbar').style.display='none';
+$('#modeBadge').textContent = DB.isFirebase ? '🟢 온라인(Firebase)' : '🟡 로컬 체험 모드';
+initWordSync();
+renderLobby();
+refreshIcons();
+</script>
+</body>
+</html>
