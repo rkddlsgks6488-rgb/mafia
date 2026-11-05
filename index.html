@@ -157,13 +157,37 @@ const DEFAULT_WORDS = [
   {id:'w17',word:'나비잠',meaning:'갓난아이가 두 팔을 머리 위로 벌리고 자는 잠',hint:'아기/잠',example:'아기가 나비잠을 자는 모습이 참 귀여웠다.',hanja:'수면(睡眠)',foreign:'슬리핑(sleeping)'},
   {id:'w18',word:'하늬바람',meaning:'서쪽에서 불어오는 바람',hint:'날씨/방향',example:'가을 들판에 하늬바람이 불어 벼가 출렁였다.',hanja:'서풍(西風)',foreign:'웨스트윈드(west wind)'},
   {id:'w19',word:'늘품',meaning:'앞으로 좋게 발전할 가능성이 있는 품질이나 소질',hint:'미래/가능성',example:'그 아이는 늘품이 있어 앞날이 기대된다.',hanja:'잠재력(潛在力)',foreign:'포텐셜(potential)'},
-  {id:'w20',word:'아라',meaning:'바다의 옛 순우리말',hint:'물/자연',example:'아라 너머로 붉은 해가 떠오르고 있었다.',hanja:'해양(海洋)',foreign:'오션(ocean)'},
   {id:'w21',word:'아리땁다',meaning:'보기에 사랑스럽고 곱다',hint:'모습/느낌',example:'아리따운 꽃들이 화단에 가득 피었다.',hanja:'미려(美麗)',foreign:'뷰티풀(beautiful)'}
 ];
-const WORDS_VERSION='2'; // 기본 단어가 늘어나면 올려서 기존 저장소에도 새 단어를 병합합니다
+const WORDS_VERSION='7';
+
+const isAraWord = w => {
+  if(!w) return false;
+  if(w.id === 'w20') return true;
+  const word = String(w.word || '').trim().replace(/\s+/g, '');
+  if(word === '아라' || word === '\uC544\uB77C') return true;
+  if(word.includes('아라') || word.includes('\uC544\uB77C')) return true;
+  const m = String(w.meaning || '');
+  if(m.includes('바다') && (word === '아라' || word === '\uC544\uB77C')) return true;
+  return false;
+};
+
+function sanitizeWords(list){
+  if(!Array.isArray(list)) return [];
+  return list.filter(w => !isAraWord(w));
+}
+
 function mergeDefaults(list){
-  const ids=new Set(list.map(w=>w.id)), added=[];
-  DEFAULT_WORDS.forEach(w=>{ if(!ids.has(w.id)){ list.push(w); added.push(w); } });
+  const filtered = sanitizeWords(list);
+  const ids=new Set(filtered.map(w=>w.id)), added=[];
+  DEFAULT_WORDS.forEach(w=>{
+    if(!isAraWord(w) && !ids.has(w.id)){
+      filtered.push(w);
+      added.push(w);
+    }
+  });
+  list.length = 0;
+  filtered.forEach(w => list.push(w));
   return added;
 }
 
@@ -207,7 +231,17 @@ const sfx = {
   win(){ [523,659,784,1047].forEach((f,i)=>tone(f,.25,'sine',i*.13)); },
   lose(){ [400,330,260].forEach((f,i)=>tone(f,.3,'sawtooth',i*.16,.1)); },
   hover(){ tone(1200,.07,'sine',0,.05); },
-  click(){ tone(700,.07,'triangle',0,.12); tone(1050,.12,'triangle',.06,.1); }
+  click(){ tone(700,.07,'triangle',0,.12); tone(1050,.12,'triangle',.06,.1); },
+  drumroll(){
+    for(let i=0; i<18; i++){ tone(120 + i*5, 0.08, 'triangle', i*0.08, 0.12 + (i/18)*0.2); }
+    tone(260, 0.4, 'square', 18*0.08, 0.22);
+  },
+  countdown(){ tone(500, 0.15, 'triangle', 0, 0.18); },
+  dramatic(){
+    tone(220, 0.25, 'sawtooth', 0, 0.15);
+    tone(293, 0.25, 'sawtooth', 0.18, 0.18);
+    tone(440, 0.5, 'sawtooth', 0.36, 0.22);
+  }
 };
 
 /* ---------- 배경음악 (WebAudio로 만든 잔잔한 루프, 켜기/끄기 가능) ---------- */
@@ -374,11 +408,13 @@ const P2P = {
               this.room.votes[data.voterId] = data.targetId;
               this.broadcast({ type: 'SYNC', room: this.room });
               if(this.roomListener) this.roomListener(this.room);
-              const n = Object.keys(this.room.players || {}).length;
+              const actPs = activePlayers(this.room);
               const v = Object.keys(this.room.votes || {}).length;
-              if(v >= n){
-                this.updateRoom({ phase: 'result', resultAt: Date.now() });
+              if(v >= actPs.length && actPs.length > 0){
+                checkVoteCompletion(this.room);
               }
+            } else if(data.type === 'LIAR_GUESS'){
+              submitLiarGuess(data.guess);
             } else if(data.type === 'ADVANCE_TURN'){
               advanceTurn(data.turnIdx);
             } else if(data.type === 'GET_STATE'){
@@ -400,6 +436,17 @@ const P2P = {
         resolve(initialRoom);
       }
     });
+  },
+
+  kick(clientId){
+    if(!this.room || !this.room.players) return;
+    delete this.room.players[clientId];
+    const conn = this.clientConns[clientId];
+    if(conn && conn.open){
+      try { conn.send({ type: 'KICKED' }); } catch(e){}
+    }
+    delete this.clientConns[clientId];
+    this.updateRoom({});
   },
 
   updateRoom(patch){
@@ -448,17 +495,30 @@ const P2P = {
           this.clientConn = conn;
 
           conn.on('open', () => {
-            connected = true;
-            clearTimeout(timer);
             conn.send({ type: 'JOIN', id: me.id, player });
-            resolve();
+            // 호스트 응답 대기, 최대 2초 내에 응답 없어도 연결 상태로 진행
+            setTimeout(() => {
+              if(!connected && this.clientConn && this.clientConn.open){
+                connected = true;
+                clearTimeout(timer);
+                resolve();
+              }
+            }, 2000);
           });
 
           conn.on('data', data => {
             if(!data || !data.type) return;
             if(data.type === 'SYNC'){
               this.room = data.room;
+              if(!connected && data.room && data.room.players && data.room.players[me.id]){
+                connected = true;
+                clearTimeout(timer);
+                resolve();
+              }
               if(this.roomListener) this.roomListener(data.room);
+            } else if(data.type === 'KICKED'){
+              toast('방장에 의해 대기실에서 내보내졌습니다');
+              leaveRoom();
             } else if(data.type === 'CLOSED'){
               toast('방장이 방을 닫았습니다');
               leaveRoom();
@@ -496,6 +556,12 @@ const P2P = {
     if(this.clientConn && this.clientConn.open){
       this.clientConn.send({ type: 'ADVANCE_TURN', turnIdx });
     }
+  },
+
+  sendLiarGuess(guess){
+    if(this.clientConn && this.clientConn.open){
+      this.clientConn.send({ type: 'LIAR_GUESS', guess });
+    }
   }
 };
 
@@ -515,6 +581,11 @@ const DB = {
         if(!P2P.room.votes) P2P.room.votes = {};
         P2P.room.votes[voterId] = val;
         P2P.updateRoom({});
+        const actPs = activePlayers(P2P.room);
+        const v = Object.keys(P2P.room.votes || {}).length;
+        if(v >= actPs.length && actPs.length > 0){
+          checkVoteCompletion(P2P.room);
+        }
       } else {
         pathSet(P2P.room, path.replace(/^rooms\/[^/]+(\/|$)/, ''), val);
         P2P.updateRoom({});
@@ -540,6 +611,11 @@ const DB = {
   },
   async remove(path){
     if(fbDb) return this.set(path,null);
+    if(path.includes('/players/')){
+      const playerId = path.split('/').pop();
+      if(P2P.hostPeer) P2P.kick(playerId);
+      return;
+    }
     if(P2P.hostPeer){
       P2P.broadcast({ type: 'CLOSED' });
       P2P.reset();
@@ -577,7 +653,8 @@ const S = {
   words:[],
   unsubRoom:null,
   lastPhase:null, lastTurn:null,
-  myVote:null
+  myVote:null,
+  hasJoinedRoom:false
 };
 const me = (()=>{
   let id=sessionStorage.getItem('sw_id');
@@ -586,22 +663,75 @@ const me = (()=>{
 })();
 
 /* ---------- 단어 풀 ---------- */
-function loadWordsLocal(){
-  try{ const w=JSON.parse(localStorage.getItem('soonwoori_words')); if(Array.isArray(w)&&w.length) return w; }catch(e){}
-  return DEFAULT_WORDS.slice();
+function purgeAraStorage(){
+  try{
+    const sw = JSON.parse(localStorage.getItem('soonwoori_words') || '[]');
+    if(Array.isArray(sw) && sw.some(isAraWord)){
+      localStorage.setItem('soonwoori_words', JSON.stringify(sanitizeWords(sw)));
+    }
+    const dbLocal = JSON.parse(localStorage.getItem(LOCAL_KEY) || '{}');
+    if(dbLocal && dbLocal.words){
+      let dirty = false;
+      if(dbLocal.words.w20){ delete dbLocal.words.w20; dirty = true; }
+      Object.keys(dbLocal.words).forEach(k => {
+        if(isAraWord(dbLocal.words[k])){ delete dbLocal.words[k]; dirty = true; }
+      });
+      if(dirty){
+        localStorage.setItem(LOCAL_KEY, JSON.stringify(dbLocal));
+      }
+    }
+  }catch(e){}
 }
-function saveWordsLocal(){ localStorage.setItem('soonwoori_words',JSON.stringify(S.words)); }
+purgeAraStorage();
+
+function loadWordsLocal(){
+  purgeAraStorage();
+  try{
+    const w=JSON.parse(localStorage.getItem('soonwoori_words'));
+    if(Array.isArray(w)&&w.length) return sanitizeWords(w);
+  }catch(e){}
+  return sanitizeWords(DEFAULT_WORDS);
+}
+function saveWordsLocal(){
+  S.words = sanitizeWords(S.words);
+  localStorage.setItem('soonwoori_words',JSON.stringify(S.words));
+}
 S.words = loadWordsLocal();
-if(localStorage.getItem('soonwoori_ver')!==WORDS_VERSION){ mergeDefaults(S.words); saveWordsLocal(); }
+if(localStorage.getItem('soonwoori_ver')!==WORDS_VERSION){
+  mergeDefaults(S.words);
+  localStorage.setItem('soonwoori_ver',WORDS_VERSION);
+  saveWordsLocal();
+}
+
 function initWordSync(){
+  purgeAraStorage();
   DB.listen('words',val=>{
     if(val===null){
       // DB가 비어 있으면 현재 단어 풀(기본 데이터 포함)을 업로드
-      const obj={}; S.words.forEach(w=>obj[w.id]=w); DB.set('words',obj); localStorage.setItem('soonwoori_ver',WORDS_VERSION); return;
+      S.words = sanitizeWords(DEFAULT_WORDS);
+      const obj={}; S.words.forEach(w=>obj[w.id]=w);
+      DB.set('words',obj);
+      localStorage.setItem('soonwoori_ver',WORDS_VERSION);
+      saveWordsLocal();
+      if($('#adminModal')) renderAdminList();
+      return;
     }
-    S.words = Object.values(val);
+    // val에서 아라를 철저히 제거
+    let list = sanitizeWords(Object.values(val));
+    if(!list.length) list = sanitizeWords(DEFAULT_WORDS);
+    S.words = list;
+
+    // 만약 DB 원본에 w20이나 아라가 남아있다면 DB에서도 즉시 삭제 및 정리
+    if(val.w20 || Object.values(val).some(isAraWord)){
+      try{ DB.remove('words/w20'); }catch(e){}
+      Object.keys(val).forEach(k => {
+        if(isAraWord(val[k])) try{ DB.remove('words/' + k); }catch(e){}
+      });
+      const cleanObj = {}; S.words.forEach(w => cleanObj[w.id] = w);
+      DB.set('words', cleanObj);
+    }
+
     if(localStorage.getItem('soonwoori_ver')!==WORDS_VERSION){
-      // 새로 추가된 기본 고유어를 DB에도 한 번만 병합
       mergeDefaults(S.words).forEach(w=>DB.set('words/'+w.id,w));
       localStorage.setItem('soonwoori_ver',WORDS_VERSION);
     }
@@ -647,7 +777,7 @@ async function createRoom(){
   $('#createBtn').disabled=true;
   try{
     let pin = String(1000+rnd(9000));
-    const initialRoom = {host:me.id,phase:'lobby',createdAt:Date.now(),players:{[me.id]:playerObj(name)}};
+    const initialRoom = {host:me.id,hostIsSpectator:true,phase:'lobby',createdAt:Date.now(),players:{[me.id]:playerObj(name)}};
     if(DB.isFirebase){
       let tries=0;
       do{ pin=String(1000+rnd(9000)); tries++; } while((await DB.get('rooms/'+pin)) && tries<20);
@@ -693,6 +823,7 @@ async function joinRoom(){
 function enterRoom(pin){
   $('#topbar').style.display='flex';
   S.view='room'; S.pin=pin; S.room=P2P.room || null; S.lastPhase=null; S.lastTurn=null; S.myVote=null;
+  S.hasJoinedRoom = (S.room && (S.room.host === me.id || (S.room.players && S.room.players[me.id]))) ? true : false;
   if(S.unsubRoom) S.unsubRoom();
   S.unsubRoom=DB.listen('rooms/'+pin,onRoomUpdate);
   if(S.room) renderRoom(true);
@@ -700,7 +831,7 @@ function enterRoom(pin){
 async function leaveRoom(){
   const pin=S.pin, room=S.room;
   if(S.unsubRoom){ S.unsubRoom(); S.unsubRoom=null; }
-  S.view='lobby'; S.pin=null; S.room=null;
+  S.view='lobby'; S.pin=null; S.room=null; S.hasJoinedRoom=false;
   try{
     if(DB.isFirebase){
       if(room && room.host===me.id) await DB.remove('rooms/'+pin);
@@ -719,8 +850,52 @@ async function leaveRoom(){
 function playersOf(room){
   return Object.entries(room.players||{}).map(([id,p])=>({id,...p})).sort((a,b)=>a.joined-b.joined);
 }
+function activePlayers(room){
+  if(!room) return [];
+  const ps = playersOf(room);
+  if(room.hostIsSpectator){
+    return ps.filter(p => p.id !== room.host);
+  }
+  return ps;
+}
 function orderOf(room){ return room.order ? Object.values(room.order) : []; }
 const isHost = () => S.room && S.room.host===me.id;
+
+function kickPlayer(playerId){
+  if(!isHost() || !S.room) return;
+  const p = S.room.players && S.room.players[playerId];
+  const name = p ? p.name : '참가자';
+  if(!confirm(`'${name}' 님을 대기실에서 내보낼까요?`)) return;
+  if(P2P.hostPeer){
+    P2P.kick(playerId);
+  } else {
+    DB.set(`rooms/${S.pin}/players/${playerId}`, null);
+  }
+  toast(`'${name}' 님을 내보냈습니다`);
+}
+
+function resetToLobby(){
+  if(!isHost() || !S.room) return;
+  if(!confirm('게임을 중단하고 대기실로 돌아갈까요? (모든 참가자가 대기실로 이동합니다)')) return;
+  DB.update('rooms/'+S.pin, {
+    phase: 'lobby',
+    votes: null,
+    word: null,
+    liar: null,
+    order: null,
+    turnIdx: 0,
+    turnEnd: null,
+    accused: null,
+    liarGuess: null,
+    liarWon: null,
+    guessCorrect: null,
+    isRevote: false,
+    revoteCandidates: null,
+    revoteCount: 0,
+    resultAt: null
+  });
+  toast('대기실로 돌아왔습니다');
+}
 
 function onRoomUpdate(room){
   if(S.view!=='room') return;
@@ -732,93 +907,201 @@ function onRoomUpdate(room){
       if(fallback){
         room = fallback;
       } else {
-        if(S.unsubRoom){S.unsubRoom();S.unsubRoom=null;}
-        S.view='lobby'; S.room=null; toast('방이 사라졌어요. 로비로 이동합니다'); renderLobby(); return;
+        return; // 일시적 지연일 수 있으므로 성급하게 방을 폭파하지 않음
       }
     }
   }
-  if(!room.players || !room.players[me.id]){
-    // 내가 목록에서 빠졌다면 로비로
-    if(P2P.room && P2P.room.host === me.id){
-      room.players = room.players || {};
+
+  // 방장 확인: 현재 사용자가 방장이면 절대 강퇴 처리하지 않고 참가자 목록에 본인을 항상 보장
+  const isMeHost = (room.host === me.id) || (S.room && S.room.host === me.id) || (P2P.room && P2P.room.host === me.id);
+  if(isMeHost){
+    room.players = room.players || {};
+    if(!room.players[me.id]){
       room.players[me.id] = playerObj(me.name);
+    }
+    S.hasJoinedRoom = true;
+  } else {
+    // 일반 학생 참가자인 경우:
+    if(room.players && room.players[me.id]){
+      S.hasJoinedRoom = true;
+    } else if(S.hasJoinedRoom){
+      // 기존에 정상적으로 방에 들어와 있다가 방장에 의해 목록에서 빠진 경우만 강퇴로 판정
+      if(S.unsubRoom){ S.unsubRoom(); S.unsubRoom=null; }
+      S.view='lobby'; S.room=null; S.hasJoinedRoom=false;
+      toast('방장에 의해 대기실에서 내보내졌습니다');
+      renderLobby();
+      return;
     } else {
-      if(S.unsubRoom){S.unsubRoom();S.unsubRoom=null;}
-      S.view='lobby'; S.room=null; renderLobby(); return;
+      // 아직 입장 처리(SYNC) 중인 상태이므로 대기
+      return;
     }
   }
+
   const prevPhase=S.lastPhase;
   S.room=room;
   if(room.phase==='lobby' || room.phase==='role') S.myVote=null;
   S.myVote = (room.votes && room.votes[me.id]) || null;
 
-  // 방장: 모든 투표 완료 시 자동 결과 공개
+  // 방장: 모든 투표 완료 시 자동 검사
   if(isHost() && room.phase==='vote'){
-    const n=Object.keys(room.players).length, v=Object.keys(room.votes||{}).length;
-    if(v>=n) DB.update('rooms/'+S.pin,{phase:'result',resultAt:Date.now()});
+    const act = activePlayers(room);
+    const v = Object.keys(room.votes||{}).length;
+    if(act.length > 0 && v >= act.length){
+      checkVoteCompletion(room);
+    }
   }
   renderRoom(prevPhase!==room.phase);
 }
 
 function renderRoom(phaseChanged){
   const r=S.room;
+  if(!r) return;
+
+  // 투표 화면 깜빡임 방지: vote 페이즈에서 이미 렌더링된 상태라면 DOM 전체 재생성을 건너뛰고 내부 상태만 업데이트
+  if(r.phase==='vote' && !phaseChanged && S.lastPhase==='vote' && document.getElementById('voteCardGrid')){
+    updateVoteScreenInPlace();
+    return;
+  }
+
   const turnKey = r.phase==='speak' ? r.turnIdx : null;
-  const needFull = phaseChanged || S.lastPhase===null || r.phase==='lobby' || r.phase==='vote' || r.phase==='role' || S.lastTurn!==turnKey || r.phase==='speak';
+  const needFull = phaseChanged || S.lastPhase===null || r.phase==='lobby' || r.phase==='role' || S.lastTurn!==turnKey || r.phase==='speak' || r.phase==='reveal' || r.phase==='liar_guess' || r.phase==='result';
   S.lastPhase=r.phase; S.lastTurn=turnKey;
   if(!needFull) return;
-  const map={lobby:viewWaiting,role:viewRole,speak:viewSpeak,vote:viewVote,result:viewResult};
+  const map={
+    lobby:viewWaiting,
+    role:viewRole,
+    speak:viewSpeak,
+    vote:viewVote,
+    reveal:viewReveal,
+    liar_guess:viewLiarGuess,
+    result:viewResult
+  };
   (map[r.phase]||viewWaiting)(phaseChanged);
   refreshIcons();
 }
 
 function roomHeader(title){
-  return `<div class="flex items-center justify-between mb-4">
-    <div class="glass rounded-2xl px-4 py-2 font-extrabold flex items-center gap-2"><i data-lucide="hash" class="w-4 h-4"></i>방 코드 <span class="text-violet-600 tracking-widest text-lg">${esc(S.pin)}</span></div>
-    <button id="leaveBtn" class="btn btn-ghost !py-2 !min-h-0 text-sm flex items-center gap-1"><i data-lucide="log-out" class="w-4 h-4"></i>나가기</button>
-  </div>${title?`<h2 class="text-2xl font-extrabold text-center mb-4">${title}</h2>`:''}`;
+  const host = isHost(), inGame = S.room && S.room.phase !== 'lobby';
+  return `<div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+    <div class="glass rounded-2xl px-4 py-2 font-extrabold flex items-center gap-2">
+      <i data-lucide="hash" class="w-4 h-4"></i>방 코드 <span class="text-violet-600 tracking-widest text-lg">${esc(S.pin)}</span>
+    </div>
+    <div class="flex items-center gap-2">
+      ${host && inGame ? `<button id="resetLobbyBtn" class="btn btn-ghost !py-2 !min-h-0 text-sm flex items-center gap-1 text-amber-800 bg-amber-100 hover:bg-amber-200 shadow-sm"><i data-lucide="rotate-ccw" class="w-4 h-4"></i>다시하기</button>` : ''}
+      <button id="leaveBtn" class="btn btn-ghost !py-2 !min-h-0 text-sm flex items-center gap-1"><i data-lucide="log-out" class="w-4 h-4"></i>나가기</button>
+    </div>
+  </div>${title ? `<h2 class="text-2xl font-extrabold text-center mb-4">${title}</h2>` : ''}`;
 }
-function bindLeave(){ const b=$('#leaveBtn'); if(b) b.onclick=()=>{ if(confirm(isHost()?'방장이 나가면 방이 사라져요. 나갈까요?':'방에서 나갈까요?')) leaveRoom(); }; }
+
+function bindLeave(){
+  const b=$('#leaveBtn');
+  if(b) b.onclick=()=>{
+    if(confirm(isHost()?'방장이 나가면 방이 사라져요. 나갈까요?':'방에서 나갈까요?')) leaveRoom();
+  };
+  const r=$('#resetLobbyBtn');
+  if(r) r.onclick=resetToLobby;
+}
+
 function avatarChip(p,extra=''){
-  return `<div class="glass rounded-2xl p-3 flex flex-col items-center ${extra}">
+  const r = S.room, host = isHost();
+  const isMe = p.id === me.id;
+  const isRoomHost = r && r.host === p.id;
+  const canKick = host && r && r.phase === 'lobby' && !isMe;
+  const isSpectator = isRoomHost && r && r.hostIsSpectator;
+
+  return `<div class="relative glass rounded-2xl p-3 flex flex-col items-center ${extra}">
+    ${canKick ? `<button onclick="kickPlayer('${p.id}')" title="내보내기" class="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-rose-500 hover:bg-rose-600 text-white font-black text-xs flex items-center justify-center shadow-md active:scale-90 transition z-10">✕</button>` : ''}
     <div class="w-14 h-14 rounded-full flex items-center justify-center text-3xl shadow-inner" style="background:${p.color}">${p.avatar}</div>
-    <div class="mt-2 font-extrabold text-sm text-center break-all">${esc(p.name)}</div>
-    ${S.room.host===p.id?'<div class="text-xs font-bold text-amber-600 mt-0.5">👑 방장</div>':''}
+    <div class="mt-2 font-extrabold text-sm text-center break-all">${esc(p.name)}${isMe ? ' (나)' : ''}</div>
+    ${isRoomHost ? `<div class="text-[11px] font-bold ${isSpectator ? 'text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full mt-1' : 'text-amber-600 mt-0.5'}">${isSpectator ? '👑 사회자(관전)' : '👑 방장(참여)'}</div>` : ''}
   </div>`;
 }
 
 /* ---------- 화면 3: 대기실 ---------- */
 function viewWaiting(){
-  const r=S.room, ps=playersOf(r), host=isHost();
+  const r=S.room, ps=playersOf(r), act=activePlayers(r), host=isHost();
   $('#screen').innerHTML = `<div class="a-up">${roomHeader('게임 대기실')}
     <div class="glass rounded-2xl p-4 mb-4 text-center font-bold">친구들에게 방 코드 <span class="text-violet-600 text-xl tracking-widest">${esc(S.pin)}</span> 를 알려 주세요!</div>
+    
+    ${host ? `<div class="glass rounded-2xl p-3.5 mb-4 flex items-center justify-between flex-wrap gap-2 bg-white/70">
+      <div>
+        <div class="font-extrabold text-sm flex items-center gap-1.5 text-slate-800">
+          <span>선생님(방장) 모드:</span>
+          <span class="${r.hostIsSpectator ? 'text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full' : 'text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full'} font-black">${r.hostIsSpectator ? '👑 사회자(진행/관전)' : '🎮 일반 플레이어(참여)'}</span>
+        </div>
+        <div class="text-xs text-slate-500 mt-1">${r.hostIsSpectator ? '선생님은 발언/라이어에서 제외되고 큰 화면으로 진행합니다' : '선생님도 학생들과 똑같이 라이어 후보로 참여합니다'}</div>
+      </div>
+      <button id="toggleHostModeBtn" class="btn btn-ghost !py-1.5 !px-3 text-xs font-bold border border-slate-300 hover:bg-slate-100">
+        ${r.hostIsSpectator ? '🎮 플레이어로 전환' : '👑 사회자(관전)로 전환'}
+      </button>
+    </div>` : ''}
+
     <div class="grid grid-cols-3 sm:grid-cols-4 gap-3 mb-5">${ps.map(p=>avatarChip(p,p.id===me.id?'ring-4 ring-violet-300':'')).join('')}</div>
-    <div class="text-center font-bold text-slate-500 mb-3">현재 ${ps.length}명 · ${ps.length<3?'3명 이상 모이면 시작할 수 있어요':'게임을 시작할 수 있어요!'}</div>
-    ${host?`<button id="startBtn" class="btn btn-primary w-full text-lg flex items-center justify-center gap-2" ${ps.length<3?'disabled':''}><i data-lucide="play" class="w-5 h-5"></i>게임 시작</button>
-      ${ps.length<3?'<button id="forceBtn" class="w-full mt-2 text-xs text-slate-400 underline">(테스트용) 2명 이하로 시작하기</button>':''}`
+    <div class="text-center font-bold text-slate-500 mb-3">현재 플레이어 ${act.length}명${r.hostIsSpectator ? ' + 사회자 1명' : ''} · ${act.length<3?'3명 이상 모이면 시작할 수 있어요':'게임을 시작할 수 있어요!'}</div>
+    ${host?`<button id="startBtn" class="btn btn-primary w-full text-lg flex items-center justify-center gap-2" ${act.length<3?'disabled':''}><i data-lucide="play" class="w-5 h-5"></i>게임 시작</button>
+      ${act.length<3?'<button id="forceBtn" class="w-full mt-2 text-xs text-slate-400 underline">(테스트용) 2명 이하로 시작하기</button>':''}`
       :`<div class="glass rounded-2xl p-4 text-center font-bold animate-pulse">방장이 시작하기를 기다리는 중...</div>`}
   </div>`;
   bindLeave();
   if(host){
     $('#startBtn').onclick=startGame;
-    const f=$('#forceBtn'); if(f) f.onclick=()=>{ if(ps.length<2){toast('최소 2명이 필요해요');return;} startGame(); };
+    const f=$('#forceBtn'); if(f) f.onclick=()=>{ if(act.length<2){toast('최소 2명이 필요해요');return;} startGame(); };
+    const t=$('#toggleHostModeBtn');
+    if(t) t.onclick=()=>DB.update('rooms/'+S.pin, { hostIsSpectator: !r.hostIsSpectator });
   }
 }
+
 async function startGame(){
-  const ps=playersOf(S.room);
-  const pool=S.words.filter(w=>w&&w.word);
+  const act = activePlayers(S.room);
+  const pool = S.words.filter(w=>w && w.word && !isAraWord(w));
   if(!pool.length){ toast('등록된 고유어가 없어요. 선생님께 문의하세요'); return; }
-  const w=pool[rnd(pool.length)];
-  const liar=ps[rnd(ps.length)].id;
-  const order=shuffle(ps.map(p=>p.id));
+  const w = pool[rnd(pool.length)];
+  const liar = act[rnd(act.length)].id;
+  const order = shuffle(act.map(p=>p.id));
   await DB.update('rooms/'+S.pin,{
-    phase:'role', word:w, liar, order, turnIdx:0, turnEnd:null, votes:null, resultAt:null, round:(S.room.round||0)+1
+    phase:'role',
+    word:w,
+    liar,
+    order,
+    turnIdx:0,
+    turnEnd:null,
+    votes:null,
+    resultAt:null,
+    round:(S.room.round||0)+1,
+    accused:null,
+    isRevote:false,
+    revoteCandidates:null,
+    revoteCount:0,
+    liarGuess:null,
+    liarWon:null,
+    guessCorrect:null
   });
 }
 
 /* ---------- 화면 3: 역할 확인 ---------- */
 function viewRole(changed){
   const r=S.room, w=r.word, liar=r.liar===me.id, host=isHost();
-  if(liar){
+  const isSpectator = host && r.hostIsSpectator;
+
+  if(isSpectator){
+    const ps = playersOf(r), byId = Object.fromEntries(ps.map(p=>[p.id,p]));
+    const liarP = byId[r.liar] || {name:'(미지정)',avatar:'❓'};
+    $('#screen').innerHTML=`<div>${roomHeader('역할 확인 (사회자 화면)')}
+      <div class="glass-blue rounded-2xl p-6 sm:p-8 text-center a-up">
+        <div class="text-6xl mb-2 a-float">👑</div>
+        <div class="inline-block bg-indigo-600 text-white font-extrabold px-4 py-1 rounded-full text-xs shadow mb-3">선생님 사회자(관전) 전용 화면</div>
+        <div class="mt-2 font-bold text-slate-500">이번 라운드 순우리말 단어</div>
+        <div class="text-5xl font-extrabold text-violet-600 my-2 a-pop">[${esc(w.word)}]</div>
+        <div class="text-lg font-extrabold leading-snug text-slate-700">[${esc(w.meaning)}]</div>
+        <div class="mt-4 p-3 bg-rose-50 rounded-xl border border-rose-200">
+          <span class="text-xs font-extrabold text-rose-600">🚨 이번 판 지정 라이어:</span>
+          <span class="text-lg font-black text-rose-700 ml-1">${esc(liarP.name)} ${liarP.avatar}</span>
+          <span class="text-xs text-rose-500 block mt-0.5">(학생들에게 보이지 않도록 스마트보드 각도에 주의하세요!)</span>
+        </div>
+      </div>
+      <button id="beginBtn" class="btn btn-primary w-full mt-4 text-lg flex items-center justify-center gap-2"><i data-lucide="mic" class="w-5 h-5"></i>학생들이 확인 완료함! 발언 시작</button>
+    </div>`;
+  } else if(liar){
     $('#screen').innerHTML=`<div>${roomHeader('역할 확인')}
       <div class="glass-red a-shake a-pulse rounded-2xl p-6 sm:p-8 text-center">
         <div class="text-7xl mb-2 a-pop">🚨</div>
@@ -828,7 +1111,7 @@ function viewRole(changed){
         <div class="mt-5 inline-block glass rounded-2xl px-5 py-3 font-extrabold text-slate-700">💡 힌트 범주: <span class="text-rose-600 text-xl">[${esc(w.hint)}]</span></div>
       </div>${roleFooter(host)}</div>`;
     if(changed) sfx.warn();
-  }else{
+  } else {
     $('#screen').innerHTML=`<div>${roomHeader('역할 확인')}
       <div class="glass-blue a-up rounded-2xl p-6 sm:p-8 text-center">
         <div class="text-7xl mb-2 a-pop">🛡️</div>
@@ -854,7 +1137,9 @@ function roleFooter(host){
 function viewSpeak(){
   const r=S.room, order=orderOf(r), ps=playersOf(r), byId=Object.fromEntries(ps.map(p=>[p.id,p]));
   const cur=byId[order[r.turnIdx]] || ps[0];
-  const mine=cur.id===me.id;
+  const mine=cur && cur.id===me.id;
+  const isSpectator = isHost() && r.hostIsSpectator;
+
   $('#screen').innerHTML=`<div class="a-up">${roomHeader('')}
     <div class="glass rounded-2xl p-5 text-center">
       <div class="text-sm font-extrabold text-slate-500">발언 순서 ${r.turnIdx+1} / ${order.length}</div>
@@ -863,16 +1148,21 @@ function viewSpeak(){
       <div class="mt-4"><div id="timerNum" class="text-6xl font-extrabold text-violet-600 tabular-nums">${TURN_SECONDS}</div>
         <div class="h-3 rounded-full bg-white/70 mt-2 overflow-hidden"><div id="timerBar" class="h-full rounded-full bg-gradient-to-r from-emerald-400 to-violet-500" style="width:100%;transition:width .3s linear"></div></div></div>
       <div class="mt-4 glass rounded-2xl p-3 font-bold text-sm sm:text-base">💬 단어를 직접 말하지 말고, 뜻을 담아 <b class="text-rose-500">한 문장</b>으로 설명하세요!</div>
+      ${isSpectator ? `<div class="mt-3 text-xs font-extrabold text-indigo-600 bg-indigo-50 py-1.5 px-3 rounded-lg inline-block">👑 사회자 모니터링: 순우리말 [${esc(r.word.word)}] / 라이어: ${esc(byId[r.liar]?.name || '')}</div>` : ''}
       ${mine?`<button id="nextTurn" class="btn btn-green mt-4 w-full flex items-center justify-center gap-2"><i data-lucide="check" class="w-5 h-5"></i>발언 끝!</button>`:''}
     </div>
     <div class="grid grid-cols-4 sm:grid-cols-6 gap-2 mt-4">
       ${order.map((id,i)=>{const p=byId[id]; if(!p) return ''; const st=i<r.turnIdx?'opacity-50':(i===r.turnIdx?'ring-4 ring-violet-400':'');
         return `<div class="glass rounded-xl p-2 text-center ${st}"><div class="text-2xl">${p.avatar}</div><div class="text-[11px] font-extrabold break-all">${i+1}. ${esc(p.name)}</div></div>`}).join('')}
     </div>
-    ${isHost()?`<button id="skipVote" class="w-full mt-4 text-xs text-slate-500 underline">방장: 발언을 건너뛰고 바로 투표하기</button>`:''}
+    ${isHost()?`<div class="flex gap-2 mt-4">
+      <button id="forceNextBtn" class="btn btn-ghost !py-2 text-xs text-slate-600 flex-1 border border-slate-300">방장: 다음 발언자로 넘기기</button>
+      <button id="skipVote" class="btn btn-ghost !py-2 text-xs text-slate-600 flex-1 border border-slate-300">방장: 바로 투표 시작하기</button>
+    </div>`:''}
   </div>`;
   bindLeave();
   const n=$('#nextTurn'); if(n) n.onclick=()=>advanceTurn(r.turnIdx);
+  const fn=$('#forceNextBtn'); if(fn) fn.onclick=()=>advanceTurn(r.turnIdx);
   const s=$('#skipVote'); if(s) s.onclick=()=>DB.update('rooms/'+S.pin,{phase:'vote',votes:null});
   tickTimer();
 }
@@ -903,24 +1193,284 @@ setInterval(tickTimer,250);
 
 /* ---------- 화면 4: 투표 ---------- */
 function viewVote(){
-  const r=S.room, ps=playersOf(r), votes=r.votes||{}, host=isHost();
-  $('#screen').innerHTML=`<div class="a-up">${roomHeader('🗳️ 누가 라이어일까요?')}
-    <div class="glass rounded-2xl p-3 mb-4 text-center font-bold">가장 의심스러운 친구를 터치하세요! <span class="text-violet-600">(${Object.keys(votes).length}/${ps.length}명 투표 완료)</span></div>
-    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
-      ${ps.map(p=>{const self=p.id===me.id, sel=S.myVote===p.id;
-        return `<button data-vote="${p.id}" ${self?'disabled':''} class="glass rounded-2xl p-4 flex flex-col items-center transition ${sel?'voted':''} ${self?'opacity-50':'active:scale-95'}">
+  const r=S.room, ps=playersOf(r), act=activePlayers(r), byId=Object.fromEntries(ps.map(p=>[p.id,p]));
+  const votes=r.votes||{}, host=isHost();
+  const isSpectator = host && r.hostIsSpectator;
+  const isRevote = !!r.isRevote;
+  const candidates = isRevote && r.revoteCandidates && r.revoteCandidates.length
+    ? r.revoteCandidates.map(id=>byId[id]).filter(Boolean)
+    : act;
+
+  $('#screen').innerHTML=`<div class="a-up">${roomHeader(isRevote ? '🔥 결선 재투표' : '🗳️ 누가 라이어일까요?')}
+    ${isRevote ? `<div class="glass-red rounded-2xl p-3 mb-4 text-center font-extrabold text-rose-700 a-shake">
+      ⚠️ 첫 투표에서 동점자가 발생했습니다!<br>동점 후보 중 진짜 라이어에게 다시 투표해 주세요!
+    </div>` : ''}
+    <div class="glass rounded-2xl p-3 mb-4 text-center font-bold">
+      ${isSpectator ? '학생들이 투표를 진행하고 있습니다.' : '가장 의심스러운 친구를 터치하세요!'}
+      <span id="voteCountSpan" class="text-violet-600 font-extrabold ml-1">(${Object.keys(votes).length}/${act.length}명 투표 완료)</span>
+    </div>
+    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3" id="voteCardGrid">
+      ${candidates.map(p=>{
+        const self=p.id===me.id, sel=S.myVote===p.id;
+        const disabled = self || isSpectator;
+        return `<button data-vote="${p.id}" ${disabled?'disabled':''} class="glass rounded-2xl p-4 flex flex-col items-center transition vote-card-btn ${sel?'voted':''} ${disabled?'opacity-50':'active:scale-95'}">
           <div class="w-16 h-16 rounded-full flex items-center justify-center text-4xl shadow-inner" style="background:${p.color}">${p.avatar}</div>
           <div class="mt-2 font-extrabold break-all">${esc(p.name)}${self?' (나)':''}</div>
-          <div class="text-xs font-bold mt-1 ${sel?'text-violet-600':'text-slate-400'}">${sel?'✅ 내가 투표함':(votes[p.id]?'투표 완료':'고민 중...')}</div>
+          <div class="text-xs font-bold mt-1 vote-status-sub ${sel?'text-violet-600':'text-slate-400'}">${sel?'✅ 내가 투표함':(votes[p.id]?'투표 완료':'고민 중...')}</div>
         </button>`}).join('')}
     </div>
-    ${host?`<button id="closeVote" class="btn btn-red w-full mt-5 flex items-center justify-center gap-2"><i data-lucide="gavel" class="w-5 h-5"></i>투표 마감하고 결과 보기</button>`:''}
+    ${host?`<button id="closeVote" class="btn btn-red w-full mt-5 flex items-center justify-center gap-2"><i data-lucide="gavel" class="w-5 h-5"></i>투표 마감하고 결과 공개</button>`:''}
   </div>`;
   bindLeave();
-  document.querySelectorAll('[data-vote]').forEach(b=>b.onclick=()=>{
-    DB.set(`rooms/${S.pin}/votes/${me.id}`,b.dataset.vote); sfx.ok();
+
+  document.querySelectorAll('[data-vote]').forEach(b=>{
+    b.onclick=(e)=>{
+      e.stopPropagation();
+      const targetId = b.dataset.vote;
+      handleVoteClick(targetId);
+    };
   });
-  const c=$('#closeVote'); if(c) c.onclick=()=>DB.update('rooms/'+S.pin,{phase:'result',resultAt:Date.now()});
+  const c=$('#closeVote');
+  if(c) c.onclick=()=>checkVoteCompletion(S.room, true);
+}
+
+function handleVoteClick(targetId){
+  if(S.myVote === targetId) return;
+  S.myVote = targetId;
+  sfx.ok();
+  updateVoteScreenInPlace();
+  DB.set(`rooms/${S.pin}/votes/${me.id}`, targetId);
+}
+
+function updateVoteScreenInPlace(){
+  const r=S.room; if(!r || r.phase!=='vote') return;
+  const act = activePlayers(r);
+  const votes = r.votes || {};
+  const span = $('#voteCountSpan');
+  if(span) span.textContent = `(${Object.keys(votes).length}/${act.length}명 투표 완료)`;
+
+  document.querySelectorAll('[data-vote]').forEach(b=>{
+    const tid = b.dataset.vote;
+    const isSel = S.myVote === tid;
+    b.classList.toggle('voted', isSel);
+    const sub = b.querySelector('.vote-status-sub');
+    if(sub){
+      sub.textContent = isSel ? '✅ 내가 투표함' : (votes[tid] ? '투표 완료' : '고민 중...');
+      sub.className = `text-xs font-bold mt-1 vote-status-sub ${isSel ? 'text-violet-600' : 'text-slate-400'}`;
+    }
+  });
+}
+
+async function checkVoteCompletion(r, force=false){
+  if(!isHost() || !r || r.phase !== 'vote') return;
+  const act = activePlayers(r);
+  const votes = r.votes || {};
+  const vCount = Object.keys(votes).length;
+  if(!force && (act.length === 0 || vCount < act.length)) return;
+
+  const count = {}; act.forEach(p => count[p.id] = 0);
+  Object.values(votes).forEach(t => { if(count[t] !== undefined) count[t]++; });
+  const max = Math.max(0, ...Object.values(count));
+  const top = Object.keys(count).filter(id => count[id] === max && max > 0);
+
+  // 동점자 발생 시 1회에 한해 결선 재투표 진행
+  if(top.length > 1 && !r.isRevote && (!r.revoteCount || r.revoteCount < 1)){
+    await DB.update('rooms/'+S.pin, {
+      phase: 'vote',
+      isRevote: true,
+      revoteCandidates: top,
+      revoteCount: (r.revoteCount || 0) + 1,
+      votes: null
+    });
+    return;
+  }
+
+  // 최다 득표자 결정 후 극적인 공개(reveal) 단계로 이동
+  const accusedId = top.length === 1 ? top[0] : null;
+  await DB.update('rooms/'+S.pin, {
+    phase: 'reveal',
+    accused: accusedId,
+    revealStartedAt: Date.now()
+  });
+}
+
+/* ---------- 화면 4.5: 극적인 정체 공개 (드럼롤 애니메이션) ---------- */
+let revealTimer = null;
+function viewReveal(changed){
+  if(revealTimer){ clearTimeout(revealTimer); revealTimer=null; }
+  const r=S.room, ps=playersOf(r), byId=Object.fromEntries(ps.map(p=>[p.id,p]));
+  const accused = r.accused ? byId[r.accused] : null;
+  const liar = byId[r.liar] || {name:'라이어',avatar:'❓'};
+  const isLiarAccused = accused && accused.id === r.liar;
+
+  $('#screen').innerHTML=`<div class="a-up">${roomHeader('🚨 결과 발표')}
+    <div id="revealSuspenseBox" class="glass rounded-2xl p-6 sm:p-8 text-center min-h-[300px] flex flex-col items-center justify-center">
+      <div id="revealIcon" class="text-7xl mb-4 a-shake">🥁</div>
+      <div id="revealTitle" class="text-2xl sm:text-3xl font-extrabold text-slate-800">과연 친구들의 지목을 받은 사람은...?</div>
+      <div id="revealCountdown" class="text-6xl font-black text-rose-500 my-4 a-pop tabular-nums">3</div>
+      <div id="revealSub" class="text-slate-500 font-bold">두구두구두구... 긴장되는 순간!</div>
+    </div>
+  </div>`;
+  bindLeave();
+
+  sfx.drumroll();
+
+  // 1초 뒤 카운트 2
+  setTimeout(()=>{
+    const c=$('#revealCountdown'); if(c){ c.textContent='2'; sfx.countdown(); }
+  }, 1000);
+
+  // 2초 뒤 카운트 1
+  setTimeout(()=>{
+    const c=$('#revealCountdown'); if(c){ c.textContent='1'; sfx.countdown(); }
+  }, 2000);
+
+  // 3초 뒤 지목된 사람 발표
+  setTimeout(()=>{
+    const box = $('#revealSuspenseBox');
+    if(!box) return;
+    sfx.dramatic();
+
+    if(!accused){
+      // 동점으로 지목 실패
+      box.innerHTML = `
+        <div class="text-7xl mb-3 a-pop">⚖️</div>
+        <div class="text-2xl font-extrabold text-slate-700">동점이라 아무도 지목되지 않았습니다!</div>
+        <div class="text-3xl font-black text-rose-600 my-3">😈 라이어 승리!</div>
+        <p class="font-bold text-slate-500">라이어가 정체를 완벽히 숨겼습니다.</p>
+      `;
+      if(isHost()){
+        revealTimer = setTimeout(()=>DB.update('rooms/'+S.pin, {phase:'result', liarWon:true, resultAt:Date.now()}), 3000);
+      }
+      return;
+    }
+
+    // 누군가 지목됨
+    box.innerHTML = `
+      <div class="text-sm font-extrabold text-slate-500 mb-1">최다 득표자 지목!</div>
+      <div class="w-20 h-20 rounded-full flex items-center justify-center text-5xl shadow-inner mx-auto my-2" style="background:${accused.color}">${accused.avatar}</div>
+      <div class="text-3xl font-extrabold text-slate-800">[${esc(accused.name)}]</div>
+      <div class="my-3 font-extrabold text-lg text-slate-600">이 사람은 과연... 라이어일까요?</div>
+      <div id="verdictBox" class="mt-4 p-4 rounded-xl ${isLiarAccused ? 'bg-rose-100 text-rose-800 border-2 border-rose-400' : 'bg-sky-100 text-sky-800 border-2 border-sky-400'} a-pop">
+        <div class="text-4xl mb-1">${isLiarAccused ? '🚨' : '😇'}</div>
+        <div class="text-2xl font-black">${isLiarAccused ? '라이어가 맞습니다!' : '선량한 시민이었습니다!'}</div>
+        <div class="text-sm font-bold mt-1">${isLiarAccused ? '정체가 들통났습니다! 하지만 라이어에게 마지막 역전 기회가...?!' : '라이어가 시민들을 완벽하게 속였습니다!'}</div>
+      </div>
+    `;
+
+    if(isHost()){
+      if(isLiarAccused){
+        // 라이어가 지목된 경우: 단어 맞히기(liar_guess)로 이동!
+        revealTimer = setTimeout(()=>DB.update('rooms/'+S.pin, {phase:'liar_guess', guessTimerEnd:Date.now()+30000}), 3500);
+      } else {
+        // 무고한 시민이 지목된 경우: 라이어 승리 결과로 바로 이동!
+        revealTimer = setTimeout(()=>DB.update('rooms/'+S.pin, {phase:'result', liarWon:true, resultAt:Date.now()}), 3500);
+      }
+    }
+  }, 3000);
+}
+
+/* ---------- 화면 4.8: 라이어 역전 고유어 맞히기 (단어 화면에 미표시) ---------- */
+let guessTimer = null;
+function viewLiarGuess(changed){
+  if(guessTimer){ clearInterval(guessTimer); guessTimer=null; }
+  const r=S.room, ps=playersOf(r), byId=Object.fromEntries(ps.map(p=>[p.id,p]));
+  const liar = byId[r.liar] || {name:'라이어',avatar:'❓'};
+  const isLiar = r.liar === me.id;
+  const isSpectator = isHost() && r.hostIsSpectator;
+
+  // 단어(r.word.word)는 라이어 화면과 학생 화면 어디에도 노출되지 않음!
+  if(isLiar){
+    $('#screen').innerHTML=`<div class="a-up">${roomHeader('🚨 마지막 역전 기회!')}
+      <div class="glass-red rounded-2xl p-6 sm:p-8 text-center a-pop">
+        <div class="text-7xl mb-2 a-float">🎯</div>
+        <div class="text-2xl font-black text-rose-700">라이어의 고유어 맞히기!</div>
+        <p class="font-bold text-slate-700 mt-2 leading-relaxed">
+          친구들이 설명했던 <b class="text-violet-600">순우리말 단어</b>는 무엇이었을까요?<br>
+          단어를 정확히 맞히면 <span class="text-rose-600 font-black">라이어의 역전 승리</span>가 됩니다!
+        </p>
+        <div class="my-3 inline-block glass rounded-2xl px-4 py-2 font-extrabold text-sm text-slate-700">
+          💡 힌트 범주: <span class="text-rose-600 text-base">[${esc(r.word.hint)}]</span>
+        </div>
+        <div class="my-3 text-4xl font-black text-rose-600 tabular-nums" id="liarTimer">30</div>
+        <div class="max-w-xs mx-auto mt-2">
+          <input id="liarWordInput" type="text" placeholder="순우리말 단어 입력 (예: 윤슬)" autocomplete="off" class="w-full text-center text-2xl font-black p-3 rounded-2xl border-2 border-rose-300 focus:outline-none focus:border-rose-500 bg-white/90 shadow-inner" />
+          <button id="submitLiarGuessBtn" class="btn btn-primary w-full mt-3 text-lg flex items-center justify-center gap-2">
+            <i data-lucide="send" class="w-5 h-5"></i>정답 제출하고 역전 노리기!
+          </button>
+        </div>
+      </div>
+    </div>`;
+  } else {
+    $('#screen').innerHTML=`<div class="a-up">${roomHeader('⏳ 라이어의 역전 시도 중')}
+      <div class="glass rounded-2xl p-6 sm:p-8 text-center a-pop">
+        <div class="text-7xl mb-2 a-float">🕵️‍♂️</div>
+        <div class="text-2xl font-black text-slate-800">라이어가 고유어를 맞히는 중입니다!</div>
+        <div class="w-20 h-20 rounded-full flex items-center justify-center text-5xl shadow-inner mx-auto my-3" style="background:${liar.color}">${liar.avatar}</div>
+        <div class="text-2xl font-extrabold text-rose-600">${esc(liar.name)}</div>
+        <p class="font-bold text-slate-600 mt-2 leading-relaxed">
+          라이어가 친구들의 발언을 조합하여 순우리말을 추리하고 있습니다.<br>
+          과연 단어를 맞혀 대역전할 수 있을까요?
+        </p>
+        <div class="my-4 text-4xl font-black text-violet-600 tabular-nums" id="liarTimer">30</div>
+        ${isSpectator ? `<div class="mt-2 text-xs font-bold text-indigo-600 bg-indigo-50 p-2 rounded-xl">👑 사회자 전용 힌트: 정답은 [${esc(r.word.word)}] 입니다.</div>` : ''}
+        ${isHost() ? `<button id="forceLiarTimeoutBtn" class="btn btn-ghost !py-2 text-xs text-slate-500 mt-4 border border-slate-300">시간 초과로 바로 마감하기</button>` : ''}
+      </div>
+    </div>`;
+  }
+  bindLeave();
+
+  const inp = $('#liarWordInput');
+  if(inp){
+    inp.focus();
+    inp.onkeydown = (e)=>{ if(e.key==='Enter') doSubmitLiarGuess(); };
+  }
+  const sBtn = $('#submitLiarGuessBtn');
+  if(sBtn) sBtn.onclick = doSubmitLiarGuess;
+  const fBtn = $('#forceLiarTimeoutBtn');
+  if(fBtn) fBtn.onclick = ()=>submitLiarGuess('(시간 초과)');
+
+  // 30초 타이머
+  const timerEnd = r.guessTimerEnd || (Date.now() + 30000);
+  function tickLiarTimer(){
+    const left = Math.max(0, timerEnd - Date.now());
+    const sec = Math.ceil(left / 1000);
+    const tEl = $('#liarTimer');
+    if(tEl) tEl.textContent = sec;
+    if(left <= 0){
+      clearInterval(guessTimer);
+      if(isHost()) submitLiarGuess('(시간 초과)');
+    }
+  }
+  guessTimer = setInterval(tickLiarTimer, 500);
+  tickLiarTimer();
+}
+
+function doSubmitLiarGuess(){
+  const inp = $('#liarWordInput');
+  const txt = inp ? inp.value.trim() : '';
+  if(!txt){ toast('단어를 입력해 주세요!'); return; }
+  submitLiarGuess(txt);
+}
+
+async function submitLiarGuess(guessText){
+  const r = S.room;
+  if(!r) return;
+  if(!isHost()){
+    if(P2P.clientConn) P2P.sendLiarGuess(guessText);
+    return;
+  }
+  const cleanGuess = (guessText || '').trim().replace(/\s+/g, '');
+  const cleanWord = (r.word && r.word.word || '').trim().replace(/\s+/g, '');
+  const correct = cleanGuess.length > 0 && cleanGuess === cleanWord;
+
+  await DB.update('rooms/'+S.pin, {
+    phase: 'result',
+    liarGuess: guessText || '(미입력)',
+    liarWon: correct,
+    guessCorrect: correct,
+    resultAt: Date.now()
+  });
 }
 
 /* ---------- 화면 5: 결과 ---------- */
@@ -931,38 +1481,59 @@ function tally(r){
   const top=Object.keys(count).filter(id=>count[id]===max && max>0);
   return {count,max,top};
 }
+
 function viewResult(changed){
-  const r=S.room, ps=playersOf(r), byId=Object.fromEntries(ps.map(p=>[p.id,p]));
+  const r=S.room, ps=playersOf(r), act=activePlayers(r), byId=Object.fromEntries(ps.map(p=>[p.id,p]));
   const {count,max,top}=tally(r);
   const liar=byId[r.liar]||{name:'(퇴장)',avatar:'❓',color:'#eee'};
-  const caught = top.length===1 && top[0]===r.liar;
-  const accused = top.length===1 ? byId[top[0]] : null;
+  const accused = r.accused ? byId[r.accused] : (top.length===1 ? byId[top[0]] : null);
+  const liarCaught = accused && accused.id === r.liar;
+  const liarWon = !!r.liarWon;
   const w=r.word;
+
+  let winHeadline = '';
+  let winDesc = '';
+  if(!liarCaught){
+    winHeadline = '😈 라이어 승리!';
+    winDesc = accused 
+      ? `시민들이 엉뚱한 친구([${esc(accused.name)}])를 지목하여 라이어가 완벽히 승리했습니다!`
+      : '투표에서 라이어를 지목하지 못하여 라이어가 승리했습니다!';
+  } else if(liarWon){
+    winHeadline = '🎯 라이어 대역전 승리!';
+    winDesc = `라이어로 지목되었지만 고유어 '[${esc(w.word)}]'를 정확하게 맞혀 대역전 승리했습니다!<br><span class="text-xs text-rose-600 font-bold">(라이어가 입력한 정답: “${esc(r.liarGuess||'')}”)</span>`;
+  } else {
+    winHeadline = '🎉 시민들의 승리!';
+    winDesc = `라이어([${esc(liar.name)}])를 찾아내고, 라이어가 단어를 맞히지 못했습니다!<br><span class="text-xs text-slate-500 font-bold">(라이어가 입력한 오답: “${esc(r.liarGuess||'(시간초과/오답)')}”)</span>`;
+  }
+
   $('#screen').innerHTML=`<div>${roomHeader('')}
     <div class="glass rounded-2xl p-5 text-center a-up">
-      <div class="font-extrabold text-slate-500">🗳️ 투표 결과</div>
+      <div class="font-extrabold text-slate-500">🗳️ 투표 집계 현황</div>
       <div class="grid grid-cols-3 sm:grid-cols-4 gap-2 mt-3">
-        ${ps.map(p=>`<div class="rounded-xl p-2 ${p.id===top[0]&&top.length===1?'bg-amber-100/80 ring-2 ring-amber-400':'bg-white/50'}">
+        ${act.map(p=>`<div class="rounded-xl p-2 ${p.id===(accused&&accused.id)?'bg-amber-100/80 ring-2 ring-amber-400':'bg-white/50'}">
           <div class="text-2xl">${p.avatar}</div><div class="text-xs font-extrabold break-all">${esc(p.name)}</div>
-          <div class="font-extrabold text-violet-600">${count[p.id]}표</div></div>`).join('')}
+          <div class="font-extrabold text-violet-600">${count[p.id]||0}표</div></div>`).join('')}
       </div>
-      <div class="mt-4 font-bold hidden-until a-up" style="animation-delay:1s">
-        ${accused?`최다 득표자: <b class="text-amber-600">${esc(accused.name)}</b> (${max}표)`:'동점이라 지목된 사람이 없어요!'}
+      <div class="mt-4 font-bold a-up">
+        ${accused?`최종 지목자: <b class="text-amber-600">${esc(accused.name)}</b> (${count[accused.id]||0}표)`:'동점으로 지목 실패'}
       </div>
     </div>
 
-    <div class="glass-red rounded-2xl p-6 mt-4 text-center hidden-until a-pop" style="animation-delay:2s">
-      <div class="text-6xl a-float">👑</div>
-      <div class="inline-block bg-rose-600 text-white font-extrabold px-4 py-1 rounded-full text-sm shadow my-2">🚨 진짜 라이어</div>
-      <div class="w-20 h-20 mx-auto rounded-full flex items-center justify-center text-5xl shadow-inner" style="background:${liar.color}">${liar.avatar}</div>
-      <div class="text-3xl font-extrabold text-rose-700 mt-2">${esc(liar.name)}${r.liar===me.id?' (나)':''}</div>
-      <div class="mt-3 text-xl font-extrabold ${caught?'text-emerald-700':'text-rose-900'}">${caught?'🎉 시민 승리! 라이어를 찾아냈어요!':'😈 라이어 승리! 끝까지 정체를 숨겼어요!'}</div>
+    <div class="${liarWon?'glass-red':'glass-blue'} rounded-2xl p-6 mt-4 text-center a-pop">
+      <div class="text-6xl a-float">${liarWon?'😈':'🎉'}</div>
+      <div class="text-3xl font-black my-2 ${liarWon?'text-rose-700':'text-emerald-700'}">${winHeadline}</div>
+      <p class="font-bold text-slate-700 leading-relaxed text-sm sm:text-base">${winDesc}</p>
+      <div class="mt-4 inline-flex items-center gap-2 bg-white/70 px-4 py-2 rounded-2xl shadow-sm">
+        <span class="text-xs font-extrabold text-slate-500">진짜 라이어:</span>
+        <span class="w-8 h-8 rounded-full flex items-center justify-center text-lg" style="background:${liar.color}">${liar.avatar}</span>
+        <span class="font-black text-rose-600">${esc(liar.name)}${r.liar===me.id?' (나)':''}</span>
+      </div>
     </div>
 
-    <div id="learnWrap" class="hidden-until a-up mt-4" style="animation-delay:3.2s">
-      <div id="learnCard" class="glass rounded-2xl p-6 sm:p-8" style="background:rgba(255,255,255,.8)">
+    <div id="learnWrap" class="a-up mt-4">
+      <div id="learnCard" class="glass rounded-2xl p-6 sm:p-8" style="background:rgba(255,255,255,.9)">
         <div class="text-center">
-          <div class="inline-block text-xs font-extrabold px-3 py-1 rounded-full bg-violet-500 text-white">📚 오늘의 고유어 학습 카드</div>
+          <div class="inline-block text-xs font-extrabold px-3 py-1 rounded-full bg-violet-500 text-white shadow-sm">📚 오늘의 순우리말 학습 카드</div>
           <div class="text-5xl sm:text-6xl font-extrabold mt-3 bg-clip-text text-transparent bg-gradient-to-r from-pink-500 to-violet-500">${esc(w.word)}</div>
         </div>
         <div class="mt-5 rounded-2xl bg-sky-50/90 p-4"><div class="text-xs font-extrabold text-sky-600 mb-1">📖 사전적 뜻</div><div class="font-extrabold text-lg leading-snug">${esc(w.meaning)}</div></div>
@@ -976,26 +1547,47 @@ function viewResult(changed){
         <div class="mt-3 rounded-2xl bg-amber-50/90 p-4"><div class="text-xs font-extrabold text-amber-600 mb-1">✏️ 실생활 예문</div><div class="font-bold leading-relaxed">“${esc(w.example||'')}”</div></div>
         <div class="mt-3 text-center text-xs font-bold text-slate-400">💡 힌트 범주: ${esc(w.hint)} · 순우리말 마피아 · 출처: 하모쌤</div>
       </div>
-      <div class="grid grid-cols-1 sm:grid-cols-${isHost()?3:2} gap-3 mt-4">
-        <button id="saveBtn" class="btn btn-primary flex items-center justify-center gap-2"><i data-lucide="download" class="w-5 h-5"></i>화면 캡처/저장하기</button>
-        ${isHost()?`<button id="againBtn" class="btn btn-green flex items-center justify-center gap-2"><i data-lucide="rotate-ccw" class="w-5 h-5"></i>같은 방에서 다시 하기</button>`:''}
-        <button id="homeBtn" class="btn btn-ghost flex items-center justify-center gap-2"><i data-lucide="home" class="w-5 h-5"></i>로비로 돌아가기</button>
+      <div class="grid grid-cols-1 sm:grid-cols-${isHost()?4:3} gap-2 mt-4">
+        <button id="saveBtn" class="btn btn-primary flex items-center justify-center gap-1.5 text-sm !py-2.5"><i data-lucide="download" class="w-4 h-4"></i>카드 캡처</button>
+        <button id="printWsBtn" class="btn btn-ghost flex items-center justify-center gap-1.5 text-sm !py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200"><i data-lucide="printer" class="w-4 h-4"></i>학습지 인쇄</button>
+        ${isHost()?`<button id="againBtn" class="btn btn-green flex items-center justify-center gap-1.5 text-sm !py-2.5"><i data-lucide="rotate-ccw" class="w-4 h-4"></i>다시 하기</button>`:''}
+        <button id="homeBtn" class="btn btn-ghost flex items-center justify-center gap-1.5 text-sm !py-2.5"><i data-lucide="home" class="w-4 h-4"></i>로비로</button>
       </div>
     </div>
   </div>`;
   bindLeave();
   $('#homeBtn').onclick=leaveRoom;
-  const a=$('#againBtn'); if(a) a.onclick=()=>DB.update('rooms/'+S.pin,{phase:'lobby',votes:null,word:null,liar:null,order:null,turnEnd:null});
+  const a=$('#againBtn');
+  if(a) a.onclick=()=>DB.update('rooms/'+S.pin,{
+    phase:'lobby',
+    votes:null,
+    word:null,
+    liar:null,
+    order:null,
+    turnIdx:0,
+    turnEnd:null,
+    accused:null,
+    liarGuess:null,
+    liarWon:null,
+    guessCorrect:null,
+    isRevote:false,
+    revoteCandidates:null,
+    revoteCount:0,
+    resultAt:null
+  });
   $('#saveBtn').onclick=saveCard;
+  const wsBtn=$('#printWsBtn');
+  if(wsBtn) wsBtn.onclick=()=>openWorksheetModal('blank');
+
   if(changed){
-    setTimeout(()=>{ caught?sfx.win():sfx.lose(); },2000);
-    setTimeout(()=>{
-      if(caught){
-        confetti({particleCount:140,spread:90,origin:{y:.5}});
-        setTimeout(()=>confetti({particleCount:100,angle:60,spread:70,origin:{x:0,y:.7}}),300);
-        setTimeout(()=>confetti({particleCount:100,angle:120,spread:70,origin:{x:1,y:.7}}),300);
-      }
-    },2000);
+    if(liarWon){
+      sfx.lose();
+    } else {
+      sfx.win();
+      confetti({particleCount:140,spread:90,origin:{y:.5}});
+      setTimeout(()=>confetti({particleCount:100,angle:60,spread:70,origin:{x:0,y:.7}}),300);
+      setTimeout(()=>confetti({particleCount:100,angle:120,spread:70,origin:{x:1,y:.7}}),300);
+    }
   }
 }
 async function saveCard(){
@@ -1087,8 +1679,11 @@ function openAdmin(){
   $('#fAdd').onclick=addWord;
   $('#fReset').onclick=async()=>{
     if(!confirm('모든 고유어를 지우고 기본 고유어로 되돌릴까요?')) return;
-    S.words=DEFAULT_WORDS.slice(); saveWordsLocal();
-    const obj={}; S.words.forEach(w=>obj[w.id]=w); await DB.set('words',obj); renderAdminList(); toast('초기화했어요');
+    purgeAraStorage();
+    S.words=sanitizeWords(DEFAULT_WORDS).slice(); saveWordsLocal();
+    const obj={}; S.words.forEach(w=>obj[w.id]=w); await DB.set('words',obj);
+    try{ await DB.remove('words/w20'); }catch(e){}
+    renderAdminList(); toast('초기화했어요');
   };
 
   const printBtn = $('#printSheetBtn');
@@ -1145,7 +1740,8 @@ function openAdmin(){
  * 고유어 학습지 인쇄 모달 (학생용 빈칸 모드 / 교사용 정답 모드)
  * ===================================================================== */
 function openWorksheetModal(mode = 'blank'){
-  const rows = S.words.map((w, idx) => {
+  const cleanList = sanitizeWords(S.words);
+  const rows = cleanList.map((w, idx) => {
     let wordCell = '';
     let exampleHtml = esc(w.example || '-');
     if(mode === 'blank'){
@@ -1256,6 +1852,7 @@ function openWorksheetModal(mode = 'blank'){
 }
 function renderAdminList(){
   const l=$('#wList'); if(!l) return;
+  S.words = sanitizeWords(S.words);
   $('#wCount').textContent=`(${S.words.length}개)`;
   l.innerHTML=S.words.map(w=>`<div class="rounded-2xl bg-white/70 p-3 flex gap-3 items-start">
     <div class="flex-1 min-w-0">
@@ -1279,6 +1876,7 @@ async function addWord(){
   const g=id=>$('#'+id).value.trim();
   const w={id:'w'+Date.now().toString(36),word:g('fWord'),meaning:g('fMeaning'),hint:g('fHint'),example:g('fExample'),hanja:g('fHanja'),foreign:g('fForeign')};
   if(!w.word||!w.meaning||!w.hint||!w.example){ toast('단어·뜻풀이·힌트·예문을 모두 입력해 주세요'); return; }
+  if(isAraWord(w)){ toast('‘아라’는 가짜 순우리말이므로 등록할 수 없습니다'); return; }
   if(S.words.some(x=>x.word===w.word)){ toast('이미 등록된 단어예요'); return; }
   S.words.push(w); saveWordsLocal();
   try{ await DB.set('words/'+w.id,w); }catch(e){ toast('Firebase 저장 실패 (로컬에는 저장됨)'); }
