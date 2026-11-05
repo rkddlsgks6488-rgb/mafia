@@ -295,7 +295,14 @@ if(useFirebase){
 const LOCAL_KEY='soonwoori_local_db';
 const localListeners=[];
 const readLocal=()=>{ try{return JSON.parse(localStorage.getItem(LOCAL_KEY))||{};}catch(e){return {};} };
-function notifyLocal(){ const d=readLocal(); localListeners.forEach(l=>l.cb(pathGet(d,l.path)??null)); }
+function notifyLocal(){
+  const d=readLocal();
+  localListeners.forEach(l=>{
+    const val = pathGet(d, l.path);
+    if(val !== undefined && val !== null) l.cb(val);
+    else if(!P2P.room) l.cb(null);
+  });
+}
 window.addEventListener('storage',e=>{ if(e.key===LOCAL_KEY) notifyLocal(); });
 
 /* =====================================================================
@@ -398,6 +405,9 @@ const P2P = {
   updateRoom(patch){
     if(!this.room) return;
     Object.assign(this.room, patch);
+    if(S.pin){
+      const d=readLocal(); pathSet(d,'rooms/'+S.pin,this.room); localStorage.setItem(LOCAL_KEY,JSON.stringify(d));
+    }
     this.broadcast({ type: 'SYNC', room: this.room });
     if(this.roomListener) this.roomListener(this.room);
   },
@@ -544,8 +554,13 @@ const DB = {
   listen(path,cb){
     if(fbDb){ const r=fbDb.ref(path); const h=r.on('value',s=>cb(s.val())); return ()=>r.off('value',h); }
     P2P.roomListener = cb;
-    if(P2P.room) setTimeout(()=>cb(P2P.room),0);
-    const l={path,cb}; localListeners.push(l); setTimeout(()=>cb(pathGet(readLocal(),path)??null),0);
+    if(P2P.room){
+      setTimeout(()=>cb(P2P.room), 0);
+    } else {
+      const val = pathGet(readLocal(), path);
+      if(val !== undefined && val !== null) setTimeout(()=>cb(val), 0);
+    }
+    const l={path,cb}; localListeners.push(l);
     return ()=>{
       P2P.roomListener = null;
       const i=localListeners.indexOf(l); if(i>=0) localListeners.splice(i,1);
@@ -639,6 +654,7 @@ async function createRoom(){
       await DB.set('rooms/'+pin, initialRoom);
     } else {
       await P2P.createRoom(pin, initialRoom);
+      const d=readLocal(); pathSet(d,'rooms/'+pin,initialRoom); localStorage.setItem(LOCAL_KEY,JSON.stringify(d));
     }
     enterRoom(pin);
   }catch(e){
@@ -676,9 +692,10 @@ async function joinRoom(){
 }
 function enterRoom(pin){
   $('#topbar').style.display='flex';
-  S.view='room'; S.pin=pin; S.room=null; S.lastPhase=null; S.lastTurn=null; S.myVote=null;
+  S.view='room'; S.pin=pin; S.room=P2P.room || null; S.lastPhase=null; S.lastTurn=null; S.myVote=null;
   if(S.unsubRoom) S.unsubRoom();
   S.unsubRoom=DB.listen('rooms/'+pin,onRoomUpdate);
+  if(S.room) renderRoom(true);
 }
 async function leaveRoom(){
   const pin=S.pin, room=S.room;
@@ -690,6 +707,7 @@ async function leaveRoom(){
       else await DB.remove(`rooms/${pin}/players/${me.id}`);
     } else {
       P2P.reset();
+      if(pin){ const d=readLocal(); pathSet(d,'rooms/'+pin,null); localStorage.setItem(LOCAL_KEY,JSON.stringify(d)); }
     }
   }catch(e){}
   renderLobby();
@@ -707,13 +725,27 @@ const isHost = () => S.room && S.room.host===me.id;
 function onRoomUpdate(room){
   if(S.view!=='room') return;
   if(!room){
-    if(S.unsubRoom){S.unsubRoom();S.unsubRoom=null;}
-    S.view='lobby'; S.room=null; toast('방이 사라졌어요. 로비로 이동합니다'); renderLobby(); return;
+    if(P2P.room){
+      room = P2P.room;
+    } else {
+      const fallback = S.pin && pathGet(readLocal(), 'rooms/' + S.pin);
+      if(fallback){
+        room = fallback;
+      } else {
+        if(S.unsubRoom){S.unsubRoom();S.unsubRoom=null;}
+        S.view='lobby'; S.room=null; toast('방이 사라졌어요. 로비로 이동합니다'); renderLobby(); return;
+      }
+    }
   }
   if(!room.players || !room.players[me.id]){
     // 내가 목록에서 빠졌다면 로비로
-    if(S.unsubRoom){S.unsubRoom();S.unsubRoom=null;}
-    S.view='lobby'; S.room=null; renderLobby(); return;
+    if(P2P.room && P2P.room.host === me.id){
+      room.players = room.players || {};
+      room.players[me.id] = playerObj(me.name);
+    } else {
+      if(S.unsubRoom){S.unsubRoom();S.unsubRoom=null;}
+      S.view='lobby'; S.room=null; renderLobby(); return;
+    }
   }
   const prevPhase=S.lastPhase;
   S.room=room;
