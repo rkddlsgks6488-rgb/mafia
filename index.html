@@ -10,6 +10,7 @@
 <script src="https://unpkg.com/lucide@latest"></script>
 <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <style>
@@ -78,6 +79,19 @@
   .hidden-until{opacity:0}
   .voted{outline:4px solid #7c9cff;transform:scale(1.03)}
   .scroll-y{max-height:60vh;overflow-y:auto}
+
+  /* ===== A4 인쇄 / PDF 저장 전용 스타일 ===== */
+  @media print {
+    body { background: #fff !important; color: #111 !important; font-family: 'Pretendard', 'Apple SD Gothic Neo', sans-serif !important; }
+    #app, #topbar, .blob, #bgmBtn, #modalRoot > div:not(#worksheetModal) { display: none !important; }
+    #worksheetModal { position: static !important; inset: auto !important; background: #fff !important; backdrop-filter: none !important; padding: 0 !important; width: 100% !important; max-width: 100% !important; }
+    #worksheetModal .no-print { display: none !important; }
+    #worksheetPaper { box-shadow: none !important; border: none !important; max-width: 100% !important; padding: 0 !important; margin: 0 !important; background: #fff !important; }
+    .print-table { width: 100% !important; border-collapse: collapse !important; }
+    .print-table th, .print-table td { border: 1px solid #333 !important; }
+    tr { page-break-inside: avoid; }
+    @page { size: A4 portrait; margin: 12mm 10mm; }
+  }
 </style>
 </head>
 <body class="text-slate-700">
@@ -253,10 +267,29 @@ document.addEventListener('pointerdown',e=>{
 /* =====================================================================
  * DB 어댑터 : Firebase 또는 로컬(localStorage) 모드
  * ===================================================================== */
-const useFirebase = firebaseConfig.apiKey && firebaseConfig.apiKey !== 'YOUR_API_KEY' && window.firebase;
+function parseFirebaseConfig(str){
+  if(!str) return null;
+  try { const o = JSON.parse(str); if(o && o.apiKey) return o; } catch(e) {}
+  const keys = ['apiKey','authDomain','databaseURL','projectId','storageBucket','messagingSenderId','appId'];
+  const res = {};
+  keys.forEach(k => {
+    const m = str.match(new RegExp(`['"]?${k}['"]?\\s*:\\s*['"]([^'"]+)['"]`));
+    if(m) res[k] = m[1];
+  });
+  if(res.apiKey) {
+    if(!res.databaseURL && res.projectId) res.databaseURL = `https://${res.projectId}-default-rtdb.firebaseio.com`;
+    return res;
+  }
+  return null;
+}
+
+let savedFb = null;
+try { savedFb = JSON.parse(localStorage.getItem('sw_firebase_config')); } catch(e){}
+const activeFbConfig = (savedFb && savedFb.apiKey) ? savedFb : firebaseConfig;
+const useFirebase = activeFbConfig.apiKey && activeFbConfig.apiKey !== 'YOUR_API_KEY' && window.firebase;
 let fbDb = null;
 if(useFirebase){
-  try{ firebase.initializeApp(firebaseConfig); fbDb = firebase.database(); }
+  try{ firebase.initializeApp(activeFbConfig); fbDb = firebase.database(); }
   catch(e){ console.error(e); }
 }
 const LOCAL_KEY='soonwoori_local_db';
@@ -265,26 +298,258 @@ const readLocal=()=>{ try{return JSON.parse(localStorage.getItem(LOCAL_KEY))||{}
 function notifyLocal(){ const d=readLocal(); localListeners.forEach(l=>l.cb(pathGet(d,l.path)??null)); }
 window.addEventListener('storage',e=>{ if(e.key===LOCAL_KEY) notifyLocal(); });
 
+/* =====================================================================
+ * 무설정 실시간 P2P 엔진 (WebRTC PeerJS)
+ * ===================================================================== */
+const P2P_PREFIX = 'swmafia-v2-';
+const P2P = {
+  hostPeer: null,
+  clientPeer: null,
+  clientConn: null,
+  clientConns: {},
+  room: null,
+  roomListener: null,
+
+  reset(){
+    if(this.hostPeer){ try{ this.hostPeer.destroy(); }catch(e){} this.hostPeer = null; }
+    if(this.clientConn){ try{ this.clientConn.close(); }catch(e){} this.clientConn = null; }
+    if(this.clientPeer){ try{ this.clientPeer.destroy(); }catch(e){} this.clientPeer = null; }
+    this.clientConns = {};
+    this.room = null;
+  },
+
+  async createRoom(pin, initialRoom){
+    this.reset();
+    return new Promise((resolve) => {
+      this.room = initialRoom;
+      if(!window.Peer){
+        console.warn('PeerJS not available, local fallback');
+        resolve(initialRoom);
+        return;
+      }
+      try {
+        const peer = new Peer(P2P_PREFIX + pin, {
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+          }
+        });
+        this.hostPeer = peer;
+        let done = false;
+        const timer = setTimeout(() => {
+          if(!done){ done = true; resolve(initialRoom); }
+        }, 3500);
+
+        peer.on('open', () => {
+          if(!done){ done = true; clearTimeout(timer); resolve(initialRoom); }
+        });
+
+        peer.on('error', err => {
+          console.warn('Host peer warning:', err);
+          if(!done){ done = true; clearTimeout(timer); resolve(initialRoom); }
+        });
+
+        peer.on('connection', conn => {
+          let clientId = null;
+          conn.on('data', data => {
+            if(!data || !data.type) return;
+            if(data.type === 'JOIN'){
+              clientId = data.id;
+              this.clientConns[clientId] = conn;
+              if(!this.room.players) this.room.players = {};
+              this.room.players[clientId] = data.player;
+              this.broadcast({ type: 'SYNC', room: this.room });
+              if(this.roomListener) this.roomListener(this.room);
+            } else if(data.type === 'VOTE'){
+              if(!this.room.votes) this.room.votes = {};
+              this.room.votes[data.voterId] = data.targetId;
+              this.broadcast({ type: 'SYNC', room: this.room });
+              if(this.roomListener) this.roomListener(this.room);
+              const n = Object.keys(this.room.players || {}).length;
+              const v = Object.keys(this.room.votes || {}).length;
+              if(v >= n){
+                this.updateRoom({ phase: 'result', resultAt: Date.now() });
+              }
+            } else if(data.type === 'ADVANCE_TURN'){
+              advanceTurn(data.turnIdx);
+            } else if(data.type === 'GET_STATE'){
+              conn.send({ type: 'SYNC', room: this.room });
+            }
+          });
+
+          conn.on('close', () => {
+            if(clientId && this.room && this.room.players && this.room.players[clientId]){
+              delete this.room.players[clientId];
+              delete this.clientConns[clientId];
+              this.broadcast({ type: 'SYNC', room: this.room });
+              if(this.roomListener) this.roomListener(this.room);
+            }
+          });
+        });
+      } catch(e) {
+        console.warn('Peer error', e);
+        resolve(initialRoom);
+      }
+    });
+  },
+
+  updateRoom(patch){
+    if(!this.room) return;
+    Object.assign(this.room, patch);
+    this.broadcast({ type: 'SYNC', room: this.room });
+    if(this.roomListener) this.roomListener(this.room);
+  },
+
+  broadcast(msg){
+    Object.values(this.clientConns).forEach(conn => {
+      try { if(conn && conn.open) conn.send(msg); } catch(e){}
+    });
+  },
+
+  async joinRoom(pin, player){
+    this.reset();
+    return new Promise((resolve, reject) => {
+      if(!window.Peer){
+        reject(new Error('실시간 통신 모듈(PeerJS)을 불러오지 못했습니다.'));
+        return;
+      }
+      try {
+        const peer = new Peer({
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+          }
+        });
+        this.clientPeer = peer;
+        let connected = false;
+        const timer = setTimeout(() => {
+          if(!connected){
+            try{ peer.destroy(); }catch(e){}
+            reject(new Error('존재하지 않거나 아직 열리지 않은 방이에요'));
+          }
+        }, 5500);
+
+        peer.on('open', () => {
+          const conn = peer.connect(P2P_PREFIX + pin, { reliable: true });
+          this.clientConn = conn;
+
+          conn.on('open', () => {
+            connected = true;
+            clearTimeout(timer);
+            conn.send({ type: 'JOIN', id: me.id, player });
+            resolve();
+          });
+
+          conn.on('data', data => {
+            if(!data || !data.type) return;
+            if(data.type === 'SYNC'){
+              this.room = data.room;
+              if(this.roomListener) this.roomListener(data.room);
+            } else if(data.type === 'CLOSED'){
+              toast('방장이 방을 닫았습니다');
+              leaveRoom();
+            }
+          });
+
+          conn.on('close', () => {
+            if(S.view === 'room'){
+              toast('방과의 연결이 종료되었습니다');
+              leaveRoom();
+            }
+          });
+
+          conn.on('error', err => {
+            if(!connected){ clearTimeout(timer); reject(err); }
+          });
+        });
+
+        peer.on('error', err => {
+          if(!connected){ clearTimeout(timer); reject(err); }
+        });
+      } catch(e) {
+        reject(e);
+      }
+    });
+  },
+
+  sendVote(targetId){
+    if(this.clientConn && this.clientConn.open){
+      this.clientConn.send({ type: 'VOTE', voterId: me.id, targetId });
+    }
+  },
+
+  sendAdvanceTurn(turnIdx){
+    if(this.clientConn && this.clientConn.open){
+      this.clientConn.send({ type: 'ADVANCE_TURN', turnIdx });
+    }
+  }
+};
+
 const DB = {
   isFirebase: !!fbDb,
+  isP2P: !fbDb,
   async get(path){
     if(fbDb){ const s=await fbDb.ref(path).once('value'); return s.val(); }
+    if(P2P.room) return P2P.room;
     return pathGet(readLocal(),path)??null;
   },
   async set(path,val){
     if(fbDb) return fbDb.ref(path).set(val);
+    if(P2P.hostPeer && P2P.room){
+      if(path.includes('/votes/')){
+        const voterId = path.split('/').pop();
+        if(!P2P.room.votes) P2P.room.votes = {};
+        P2P.room.votes[voterId] = val;
+        P2P.updateRoom({});
+      } else {
+        pathSet(P2P.room, path.replace(/^rooms\/[^/]+(\/|$)/, ''), val);
+        P2P.updateRoom({});
+      }
+      return;
+    }
+    if(P2P.clientConn){
+      if(path.includes('/votes/')){
+        P2P.sendVote(val);
+      }
+      return;
+    }
     const d=readLocal(); pathSet(d,path,val); localStorage.setItem(LOCAL_KEY,JSON.stringify(d)); notifyLocal();
   },
   async update(path,obj){
     if(fbDb) return fbDb.ref(path).update(obj);
+    if(P2P.hostPeer && P2P.room){
+      P2P.updateRoom(obj);
+      return;
+    }
     const d=readLocal(); Object.keys(obj).forEach(k=>pathSet(d,path+'/'+k,obj[k]));
     localStorage.setItem(LOCAL_KEY,JSON.stringify(d)); notifyLocal();
   },
-  async remove(path){ return this.set(path,null); },
+  async remove(path){
+    if(fbDb) return this.set(path,null);
+    if(P2P.hostPeer){
+      P2P.broadcast({ type: 'CLOSED' });
+      P2P.reset();
+      return;
+    }
+    if(P2P.clientConn){
+      P2P.reset();
+      return;
+    }
+    return this.set(path,null);
+  },
   listen(path,cb){
     if(fbDb){ const r=fbDb.ref(path); const h=r.on('value',s=>cb(s.val())); return ()=>r.off('value',h); }
+    P2P.roomListener = cb;
+    if(P2P.room) setTimeout(()=>cb(P2P.room),0);
     const l={path,cb}; localListeners.push(l); setTimeout(()=>cb(pathGet(readLocal(),path)??null),0);
-    return ()=>{ const i=localListeners.indexOf(l); if(i>=0) localListeners.splice(i,1); };
+    return ()=>{
+      P2P.roomListener = null;
+      const i=localListeners.indexOf(l); if(i>=0) localListeners.splice(i,1);
+    };
   }
 };
 
@@ -345,7 +610,7 @@ function renderLobby(){
         <button id="joinBtn" class="btn btn-green">게임 참여하기 <i data-lucide="log-in" class="w-5 h-5"></i></button>
         <button id="createBtn" class="btn btn-primary">새 방 만들기</button>
       </div>
-      <div class="mode-tag">${DB.isFirebase?'🟢 온라인(Firebase)':'🟡 로컬 체험 모드'} · 출처: 하모쌤</div>
+      <div class="mode-tag select-none">${DB.isFirebase?'🟢 온라인(Firebase)':'🟢 실시간 온라인 (자동 연동)'} · 출처: 하모쌤</div>
     </div>
   </div>`;
   $('#pin').addEventListener('input',e=>e.target.value=e.target.value.replace(/\D/g,''));
@@ -366,28 +631,48 @@ async function createRoom(){
   const name=readNick(); if(!name) return;
   $('#createBtn').disabled=true;
   try{
-    let pin, tries=0;
-    do{ pin=String(1000+rnd(9000)); tries++; } while((await DB.get('rooms/'+pin)) && tries<20);
-    await DB.set('rooms/'+pin,{host:me.id,phase:'lobby',createdAt:Date.now(),players:{[me.id]:playerObj(name)}});
+    let pin = String(1000+rnd(9000));
+    const initialRoom = {host:me.id,phase:'lobby',createdAt:Date.now(),players:{[me.id]:playerObj(name)}};
+    if(DB.isFirebase){
+      let tries=0;
+      do{ pin=String(1000+rnd(9000)); tries++; } while((await DB.get('rooms/'+pin)) && tries<20);
+      await DB.set('rooms/'+pin, initialRoom);
+    } else {
+      await P2P.createRoom(pin, initialRoom);
+    }
     enterRoom(pin);
-  }catch(e){ console.error(e); toast('방 만들기 실패: 네트워크/Firebase 설정을 확인하세요'); $('#createBtn').disabled=false; }
+  }catch(e){
+    console.error(e);
+    toast('방 만들기 실패: 잠시 후 다시 시도해 주세요');
+    $('#createBtn').disabled=false;
+  }
 }
 async function joinRoom(){
   const name=readNick(); if(!name) return;
   const pin=$('#pin').value.trim();
   if(pin.length!==4){ toast('방 코드 4자리를 입력해 주세요 🔢'); return; }
+  $('#joinBtn').disabled=true;
   try{
-    const room=await DB.get('rooms/'+pin);
-    if(!room){ toast('존재하지 않는 방이에요 😢'); return; }
-    const players=room.players||{};
-    if(!players[me.id]){
-      if(room.phase!=='lobby'){ toast('이미 게임이 진행 중인 방이에요'); return; }
-      if(Object.keys(players).length>=MAX_PLAYERS){ toast(`최대 ${MAX_PLAYERS}명까지 입장할 수 있어요`); return; }
-      if(Object.values(players).some(p=>p.name===name)){ toast('같은 닉네임이 이미 있어요. 바꿔 주세요'); return; }
-      await DB.set(`rooms/${pin}/players/${me.id}`,playerObj(name));
+    if(DB.isFirebase){
+      const room=await DB.get('rooms/'+pin);
+      if(!room){ toast('존재하지 않는 방이에요 😢 방 코드 4자리를 다시 확인해 주세요'); $('#joinBtn').disabled=false; return; }
+      const players=room.players||{};
+      if(!players[me.id]){
+        if(room.phase!=='lobby'){ toast('이미 게임이 진행 중인 방이에요'); $('#joinBtn').disabled=false; return; }
+        if(Object.keys(players).length>=MAX_PLAYERS){ toast(`최대 ${MAX_PLAYERS}명까지 입장할 수 있어요`); $('#joinBtn').disabled=false; return; }
+        if(Object.values(players).some(p=>p.name===name)){ toast('같은 닉네임이 이미 있어요. 바꿔 주세요'); $('#joinBtn').disabled=false; return; }
+        await DB.set(`rooms/${pin}/players/${me.id}`,playerObj(name));
+      }
+    } else {
+      toast('방에 연결 중... 잠시만 기다려 주세요 ⏳');
+      await P2P.joinRoom(pin, playerObj(name));
     }
     enterRoom(pin);
-  }catch(e){ console.error(e); toast('입장 실패: 네트워크를 확인하세요'); }
+  }catch(e){
+    console.error(e);
+    toast(e.message || '입장 실패: 방 코드를 확인하거나 다시 시도해 주세요');
+    $('#joinBtn').disabled=false;
+  }
 }
 function enterRoom(pin){
   $('#topbar').style.display='flex';
@@ -400,8 +685,12 @@ async function leaveRoom(){
   if(S.unsubRoom){ S.unsubRoom(); S.unsubRoom=null; }
   S.view='lobby'; S.pin=null; S.room=null;
   try{
-    if(room && room.host===me.id) await DB.remove('rooms/'+pin);
-    else await DB.remove(`rooms/${pin}/players/${me.id}`);
+    if(DB.isFirebase){
+      if(room && room.host===me.id) await DB.remove('rooms/'+pin);
+      else await DB.remove(`rooms/${pin}/players/${me.id}`);
+    } else {
+      P2P.reset();
+    }
   }catch(e){}
   renderLobby();
 }
@@ -557,6 +846,10 @@ function viewSpeak(){
 }
 async function advanceTurn(expectedIdx){
   const r=S.room; if(!r||r.phase!=='speak'||r.turnIdx!==expectedIdx) return;
+  if(!isHost() && P2P.clientConn){
+    P2P.sendAdvanceTurn(expectedIdx);
+    return;
+  }
   const total=orderOf(r).length;
   if(expectedIdx+1<total) await DB.update('rooms/'+S.pin,{turnIdx:expectedIdx+1,turnEnd:Date.now()+TURN_SECONDS*1000});
   else await DB.update('rooms/'+S.pin,{phase:'vote',votes:null,turnEnd:null});
@@ -693,7 +986,7 @@ function openPwModal(){
     <div class="glass rounded-2xl p-6 w-full max-w-sm a-pop" style="background:rgba(255,255,255,.8)">
       <div class="text-center text-4xl mb-1">🔐</div>
       <h3 class="text-xl font-extrabold text-center mb-3">선생님 확인</h3>
-      <input id="pwInp" type="password" inputmode="numeric" class="inp text-center text-xl tracking-widest" placeholder="비밀번호">
+      <input id="pwInp" type="password" inputmode="numeric" class="inp text-center text-xl tracking-widest" placeholder="비밀번호 (기본 0000)">
       <div id="pwErr" class="text-rose-500 text-sm font-bold text-center mt-2 h-5"></div>
       <div class="grid grid-cols-2 gap-2 mt-2">
         <button id="pwCancel" class="btn btn-ghost">취소</button><button id="pwOk" class="btn btn-primary">확인</button>
@@ -709,14 +1002,21 @@ function openPwModal(){
 }
 function openAdmin(){
   $('#modalRoot').innerHTML=`<div id="adminModal" class="fixed inset-0 z-50 flex items-center justify-center p-3 bg-slate-900/30 backdrop-blur-sm">
-    <div class="glass rounded-2xl w-full max-w-2xl max-h-[92vh] flex flex-col a-up" style="background:rgba(255,255,255,.85)">
+    <div class="glass rounded-2xl w-full max-w-2xl max-h-[92vh] flex flex-col a-up" style="background:rgba(255,255,255,.92)">
       <div class="flex items-center justify-between p-4 border-b border-white/70">
-        <h3 class="text-xl font-extrabold">📋 고유어 관리 대시보드</h3>
+        <div class="flex items-center gap-2">
+          <span class="text-2xl">📋</span>
+          <div>
+            <h3 class="text-xl font-extrabold leading-none">선생님 관리 대시보드</h3>
+            <span class="text-xs font-bold text-emerald-700 bg-emerald-100/80 px-2 py-0.5 rounded-full inline-block mt-1">🟢 실시간 자동 연동 가동 중 (설정 불필요)</span>
+          </div>
+        </div>
         <button id="admClose" class="w-10 h-10 rounded-full glass flex items-center justify-center"><i data-lucide="x" class="w-5 h-5"></i></button>
       </div>
       <div class="overflow-y-auto p-4 space-y-4">
-        <div class="rounded-2xl bg-white/60 p-4 space-y-2">
-          <div class="font-extrabold">➕ 새 고유어 추가</div>
+        <!-- 단어 추가 박스 -->
+        <div class="rounded-2xl bg-white/70 p-4 space-y-2">
+          <div class="font-extrabold text-slate-700">➕ 새 고유어 단어 추가</div>
           <input id="fWord" class="inp" placeholder="고유어(단어) 예) 마루">
           <input id="fMeaning" class="inp" placeholder="뜻풀이">
           <input id="fHint" class="inp" placeholder="라이어 힌트(상위 개념) 예) 집/공간">
@@ -727,18 +1027,200 @@ function openAdmin(){
           </div>
           <button id="fAdd" class="btn btn-green w-full">추가하기</button>
         </div>
-        <div><div class="font-extrabold mb-2">현재 등록된 고유어 <span id="wCount" class="text-violet-600"></span></div><div id="wList" class="space-y-2"></div></div>
-        <button id="fReset" class="text-xs text-slate-500 underline">기본 고유어로 초기화</button>
+
+        <!-- 단어 목록 -->
+        <div>
+          <div class="font-extrabold mb-2 text-slate-700">현재 등록된 고유어 <span id="wCount" class="text-emerald-700"></span></div>
+          <div id="wList" class="space-y-2"></div>
+        </div>
+
+        <!-- 단어 관리 하단 버튼 -->
+        <div class="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200">
+          <div class="flex items-center gap-2">
+            <button id="printSheetBtn" class="btn btn-green !py-1 !px-3 !min-h-0 text-xs flex items-center gap-1 font-extrabold shadow">🖨️ 학습지 인쇄 / PDF (빈칸·정답)</button>
+            <button id="fReset" class="text-xs text-slate-500 underline ml-1">기본 고유어로 초기화</button>
+          </div>
+          <div class="flex items-center gap-2">
+            <button id="expWordsBtn" class="btn btn-ghost !py-1 !px-2.5 !min-h-0 text-xs flex items-center gap-1 font-bold">💾 단어 파일로 저장</button>
+            <button id="impWordsBtn" class="btn btn-ghost !py-1 !px-2.5 !min-h-0 text-xs flex items-center gap-1 font-bold">📂 다른 PC로 가져오기</button>
+            <input type="file" id="impWordsFile" accept=".json" class="hidden">
+          </div>
+        </div>
       </div>
     </div></div>`;
+
   $('#admClose').onclick=closeModal;
+
+  // 단어 관리 이벤트
   $('#fAdd').onclick=addWord;
   $('#fReset').onclick=async()=>{
     if(!confirm('모든 고유어를 지우고 기본 고유어로 되돌릴까요?')) return;
     S.words=DEFAULT_WORDS.slice(); saveWordsLocal();
     const obj={}; S.words.forEach(w=>obj[w.id]=w); await DB.set('words',obj); renderAdminList(); toast('초기화했어요');
   };
-  renderAdminList(); refreshIcons();
+
+  const printBtn = $('#printSheetBtn');
+  if(printBtn) printBtn.onclick = () => openWorksheetModal('blank');
+
+  const expBtn = $('#expWordsBtn');
+  if(expBtn){
+    expBtn.onclick=()=>{
+      const blob = new Blob([JSON.stringify(S.words, null, 2)], { type: 'application/json;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `순우리말_단어목록.json`;
+      a.click();
+      toast('단어 목록 파일이 다운로드되었습니다 💾 (다른 컴퓨터에서 불러올 수 있어요)');
+    };
+  }
+  const impBtn = $('#impWordsBtn');
+  const impFile = $('#impWordsFile');
+  if(impBtn && impFile){
+    impBtn.onclick = () => impFile.click();
+    impFile.onchange = e => {
+      const file = e.target.files && e.target.files[0];
+      if(!file) return;
+      const reader = new FileReader();
+      reader.onload = async ev => {
+        try {
+          const list = JSON.parse(ev.target.result);
+          if(Array.isArray(list) && list.length){
+            mergeDefaults(list);
+            S.words = list;
+            saveWordsLocal();
+            if(DB.isFirebase){
+              const obj={}; S.words.forEach(w=>obj[w.id]=w); await DB.set('words',obj);
+            }
+            renderAdminList();
+            toast(`${list.length}개의 단어를 성공적으로 불러왔습니다! ✅`);
+          } else {
+            toast('올바른 단어 목록 파일 형식이 아니에요 😢');
+          }
+        } catch(err){
+          toast('파일을 읽는 중 오류가 발생했습니다');
+        }
+        impFile.value = '';
+      };
+      reader.readAsText(file);
+    };
+  }
+
+  renderAdminList();
+  refreshIcons();
+}
+
+/* =====================================================================
+ * 고유어 학습지 인쇄 모달 (학생용 빈칸 모드 / 교사용 정답 모드)
+ * ===================================================================== */
+function openWorksheetModal(mode = 'blank'){
+  const rows = S.words.map((w, idx) => {
+    let wordCell = '';
+    let exampleHtml = esc(w.example || '-');
+    if(mode === 'blank'){
+      wordCell = `<div class="h-8 flex items-center justify-center font-bold text-slate-300 border-b border-dashed border-slate-400 mx-1">( &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; )</div>`;
+      if(w.word && w.example){
+        exampleHtml = esc(w.example).split(w.word).join('<span class="border-b border-slate-700 px-3 font-bold text-slate-400">( &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; )</span>');
+      }
+    } else {
+      wordCell = `<div class="font-extrabold text-rose-600 text-sm text-center">${esc(w.word)}</div>`;
+      if(w.word && w.example){
+        exampleHtml = esc(w.example).split(w.word).join(`<b class="text-rose-600 font-extrabold">[${esc(w.word)}]</b>`);
+      }
+    }
+    return `
+      <tr class="${idx%2===0?'bg-white':'bg-slate-50/60'}">
+        <td class="py-2.5 px-1 border border-slate-400 text-center font-bold">${idx+1}</td>
+        <td class="py-2.5 px-2 border border-slate-400">${wordCell}</td>
+        <td class="py-2.5 px-2 border border-slate-400 text-center font-bold text-slate-600">${esc(w.hint)}</td>
+        <td class="py-2.5 px-3 border border-slate-400 font-medium leading-snug">${esc(w.meaning)}</td>
+        <td class="py-2.5 px-3 border border-slate-400 leading-snug font-medium">“${exampleHtml}”</td>
+        <td class="py-2.5 px-2 border border-slate-400 text-center text-[11px] font-semibold text-slate-600">
+          ${esc(w.hanja||'-')}<br><span class="text-slate-400">${esc(w.foreign||'-')}</span>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  $('#modalRoot').innerHTML = `
+    <div id="worksheetModal" class="fixed inset-0 z-50 overflow-y-auto bg-slate-900/50 backdrop-blur-sm p-3 sm:p-6 flex flex-col items-center">
+      <!-- 상단 컨트롤 바 (인쇄 시 자동 숨김) -->
+      <div class="no-print w-full max-w-4xl bg-white/95 rounded-2xl p-3 shadow-xl mb-4 flex flex-wrap items-center justify-between gap-3 sticky top-2 z-10 border border-slate-200">
+        <div class="flex items-center gap-2">
+          <span class="text-lg">🖨️</span>
+          <span class="font-extrabold text-slate-800 text-sm">고유어 학습지 인쇄 미리보기</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <div class="bg-slate-100 p-1 rounded-xl flex items-center gap-1 border border-slate-200 text-xs font-bold">
+            <button id="wsBlankBtn" class="px-3 py-1.5 rounded-lg transition ${mode==='blank'?'bg-emerald-600 text-white shadow':'text-slate-600 hover:text-slate-900'}">✏️ 학생용 (빈칸 퀴즈)</button>
+            <button id="wsAnswerBtn" class="px-3 py-1.5 rounded-lg transition ${mode==='answer'?'bg-rose-600 text-white shadow':'text-slate-600 hover:text-slate-900'}">🔑 교사용 (정답·해설)</button>
+          </div>
+          <button id="wsDoPrint" class="btn btn-primary !py-1.5 !px-3.5 !min-h-0 text-xs font-extrabold flex items-center gap-1.5 shadow"><i data-lucide="printer" class="w-4 h-4"></i>바로 인쇄 (A4 / PDF)</button>
+          <button id="wsBackToAdmin" class="btn btn-ghost !py-1.5 !px-3 !min-h-0 text-xs font-bold">대시보드로</button>
+          <button id="wsClose" class="w-8 h-8 rounded-full glass flex items-center justify-center font-bold text-slate-600 hover:bg-slate-200">✕</button>
+        </div>
+      </div>
+
+      <!-- 실제 A4 학습지 용지 영역 -->
+      <div id="worksheetPaper" class="w-full max-w-4xl bg-white text-slate-900 p-8 sm:p-12 rounded-2xl shadow-2xl border border-slate-200 a-up font-sans">
+        <!-- 학습지 타이틀 헤더 -->
+        <div class="border-b-2 border-slate-800 pb-3 mb-4">
+          <div class="flex items-center justify-between text-xs font-bold text-slate-500">
+            <span class="border border-slate-400 px-2 py-0.5 rounded">초등학교 6학년 국어과</span>
+            <span>단원: 6학년 국어 '소중한 우리말' (순우리말 마피아 연계)</span>
+          </div>
+          <h1 class="text-2xl sm:text-3xl font-extrabold text-center mt-3 tracking-tight text-slate-900">
+            소중한 우리말(고유어) 탐구 학습지
+            ${mode==='answer'?'<span class="text-rose-600 text-lg font-bold block sm:inline sm:ml-2">[교사용 정답·해설]</span>':'<span class="text-emerald-700 text-lg font-bold block sm:inline sm:ml-2">[학생용 빈칸 퀴즈]</span>'}
+          </h1>
+          <div class="flex flex-wrap items-center justify-between text-xs font-bold mt-4 pt-2 border-t border-slate-300 gap-2">
+            <div>일시: 202&nbsp;&nbsp;년 &nbsp;&nbsp;월 &nbsp;&nbsp;일</div>
+            <div class="flex items-center gap-4">
+              <span>6학년 &nbsp;&nbsp;&nbsp;&nbsp;반 &nbsp;&nbsp;&nbsp;&nbsp;번</span>
+              <span>이름: ____________________</span>
+              <span class="border border-slate-400 px-2.5 py-0.5 rounded">점수: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/ ${S.words.length}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 안내 문구 -->
+        <div class="text-xs font-semibold text-slate-700 mb-4 bg-slate-50 p-3 rounded-lg border border-slate-300">
+          ${mode==='blank' 
+            ? '💡 <b>[학습 안내]</b> 사전적 뜻풀이와 실생활 예문을 꼼꼼히 읽고, <b>( &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; )</b> 빈칸에 들어갈 알맞은 아름다운 우리말(고유어)을 찾아 직접 써 봅시다.' 
+            : '💡 <b>[교사용 지도 안내]</b> 빨간색 글씨는 정답 고유어입니다. 단어의 사전적 의미와 함께 대조되는 한자어·외래어와의 차이점을 함께 지도해 주세요.'}
+        </div>
+
+        <!-- 표 본문 -->
+        <table class="print-table w-full text-xs border-collapse">
+          <thead>
+            <tr class="bg-slate-100 font-extrabold text-slate-800 text-center">
+              <th class="py-2.5 px-1 border border-slate-400 w-10">번호</th>
+              <th class="py-2.5 px-2 border border-slate-400 w-28">고유어 (순우리말)</th>
+              <th class="py-2.5 px-2 border border-slate-400 w-20">힌트 범주</th>
+              <th class="py-2.5 px-3 border border-slate-400 text-left">사전적 뜻풀이</th>
+              <th class="py-2.5 px-3 border border-slate-400 text-left w-64">실생활 예문 (문맥 탐구)</th>
+              <th class="py-2.5 px-2 border border-slate-400 w-28">대조 어휘<br><span class="text-[10px] text-slate-500 font-normal">(한자어 / 외래어)</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows}
+          </tbody>
+        </table>
+
+        <!-- 하단 출처 및 저작권 안내 -->
+        <div class="mt-6 pt-3 border-t border-slate-300 flex items-center justify-between text-[11px] text-slate-500 font-semibold">
+          <span>순우리말 마피아 (고유어 라이어 게임) 수업 연계 자료</span>
+          <span>출처: 하모쌤</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  $('#wsBlankBtn').onclick = () => openWorksheetModal('blank');
+  $('#wsAnswerBtn').onclick = () => openWorksheetModal('answer');
+  $('#wsDoPrint').onclick = () => window.print();
+  $('#wsBackToAdmin').onclick = openAdmin;
+  $('#wsClose').onclick = closeModal;
+  refreshIcons();
 }
 function renderAdminList(){
   const l=$('#wList'); if(!l) return;
@@ -777,7 +1259,7 @@ async function addWord(){
  * ===================================================================== */
 $('#adminBtn').onclick=openPwModal;
 $('#topbar').style.display='none';
-$('#modeBadge').textContent = DB.isFirebase ? '🟢 온라인(Firebase)' : '🟡 로컬 체험 모드';
+$('#modeBadge').textContent = DB.isFirebase ? '🟢 온라인(Firebase)' : '🟢 실시간 온라인';
 initWordSync();
 renderLobby();
 refreshIcons();
