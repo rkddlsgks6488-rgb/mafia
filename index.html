@@ -340,9 +340,26 @@ function notifyLocal(){
 window.addEventListener('storage',e=>{ if(e.key===LOCAL_KEY) notifyLocal(); });
 
 /* =====================================================================
- * 무설정 실시간 P2P 엔진 (WebRTC PeerJS)
+ * 무설정 실시간 P2P 엔진 (WebRTC PeerJS + 학교 방화벽 우회 TURN + 자동 재시도)
  * ===================================================================== */
 const P2P_PREFIX = 'swmafia-v2-';
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  {
+    urls: [
+      'turn:openrelay.metered.ca:80',
+      'turn:openrelay.metered.ca:443',
+      'turn:openrelay.metered.ca:443?transport=tcp'
+    ],
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  }
+];
+
 const P2P = {
   hostPeer: null,
   clientPeer: null,
@@ -350,8 +367,10 @@ const P2P = {
   clientConns: {},
   room: null,
   roomListener: null,
+  joinRetryTimer: null,
 
   reset(){
+    if(this.joinRetryTimer){ clearInterval(this.joinRetryTimer); this.joinRetryTimer = null; }
     if(this.hostPeer){ try{ this.hostPeer.destroy(); }catch(e){} this.hostPeer = null; }
     if(this.clientConn){ try{ this.clientConn.close(); }catch(e){} this.clientConn = null; }
     if(this.clientPeer){ try{ this.clientPeer.destroy(); }catch(e){} this.clientPeer = null; }
@@ -359,41 +378,53 @@ const P2P = {
     this.room = null;
   },
 
-  async createRoom(pin, initialRoom){
+  async createRoom(pin, initialRoom, attempt = 0){
     this.reset();
     return new Promise((resolve) => {
       this.room = initialRoom;
       if(!window.Peer){
         console.warn('PeerJS not available, local fallback');
-        resolve(initialRoom);
+        resolve(pin);
         return;
       }
       try {
         const peer = new Peer(P2P_PREFIX + pin, {
-          config: {
-            iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:stun1.l.google.com:19302' }
-            ]
-          }
+          pingInterval: 5000,
+          config: { iceServers: ICE_SERVERS }
         });
         this.hostPeer = peer;
         let done = false;
         const timer = setTimeout(() => {
-          if(!done){ done = true; resolve(initialRoom); }
-        }, 3500);
+          if(!done){ done = true; resolve(pin); }
+        }, 5000);
 
         peer.on('open', () => {
-          if(!done){ done = true; clearTimeout(timer); resolve(initialRoom); }
+          if(!done){ done = true; clearTimeout(timer); resolve(pin); }
+        });
+
+        peer.on('disconnected', () => {
+          if(this.hostPeer && !this.hostPeer.destroyed){
+            try { this.hostPeer.reconnect(); } catch(e){}
+          }
         });
 
         peer.on('error', err => {
           console.warn('Host peer warning:', err);
-          if(!done){ done = true; clearTimeout(timer); resolve(initialRoom); }
+          if(err && err.type === 'unavailable-id' && attempt < 5){
+            clearTimeout(timer);
+            done = true;
+            const nextPin = String(1000 + rnd(9000));
+            this.createRoom(nextPin, initialRoom, attempt + 1).then(resolve);
+            return;
+          }
+          if(!done){ done = true; clearTimeout(timer); resolve(pin); }
         });
 
         peer.on('connection', conn => {
           let clientId = null;
+          conn.on('open', () => {
+            try { conn.send({ type: 'HELLO', room: this.room }); } catch(e){}
+          });
           conn.on('data', data => {
             if(!data || !data.type) return;
             if(data.type === 'JOIN'){
@@ -401,6 +432,7 @@ const P2P = {
               this.clientConns[clientId] = conn;
               if(!this.room.players) this.room.players = {};
               this.room.players[clientId] = data.player;
+              try { conn.send({ type: 'SYNC', room: this.room }); } catch(e){}
               this.broadcast({ type: 'SYNC', room: this.room });
               if(this.roomListener) this.roomListener(this.room);
             } else if(data.type === 'VOTE'){
@@ -433,7 +465,7 @@ const P2P = {
         });
       } catch(e) {
         console.warn('Peer error', e);
-        resolve(initialRoom);
+        resolve(pin);
       }
     });
   },
@@ -465,7 +497,7 @@ const P2P = {
     });
   },
 
-  async joinRoom(pin, player){
+  async joinRoom(pin, player, attempt = 1){
     this.reset();
     return new Promise((resolve, reject) => {
       if(!window.Peer){
@@ -474,46 +506,85 @@ const P2P = {
       }
       try {
         const peer = new Peer({
-          config: {
-            iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:stun1.l.google.com:19302' }
-            ]
-          }
+          pingInterval: 5000,
+          config: { iceServers: ICE_SERVERS }
         });
         this.clientPeer = peer;
         let connected = false;
+        let settled = false;
+
+        const failOrRetry = (reason) => {
+          if(settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if(this.joinRetryTimer){ clearInterval(this.joinRetryTimer); this.joinRetryTimer = null; }
+          try{ peer.destroy(); }catch(e){}
+          if(attempt < 3){
+            setTimeout(() => {
+              this.joinRoom(pin, player, attempt + 1).then(resolve).catch(reject);
+            }, 600);
+          } else {
+            // 같은 기기 내 로컬 방이 존재하는지 최종 확인
+            const localRoom = pathGet(readLocal(), 'rooms/' + pin);
+            if(localRoom && localRoom.phase === 'lobby'){
+              localRoom.players = localRoom.players || {};
+              localRoom.players[me.id] = player;
+              const d = readLocal(); pathSet(d, 'rooms/' + pin, localRoom);
+              localStorage.setItem(LOCAL_KEY, JSON.stringify(d));
+              notifyLocal();
+              this.room = localRoom;
+              resolve();
+              return;
+            }
+            reject(new Error(reason || '존재하지 않거나 아직 열리지 않은 방이에요 (방 코드 4자리와 와이파이/네트워크를 확인해 주세요)'));
+          }
+        };
+
         const timer = setTimeout(() => {
           if(!connected){
-            try{ peer.destroy(); }catch(e){}
-            reject(new Error('존재하지 않거나 아직 열리지 않은 방이에요'));
+            failOrRetry('존재하지 않거나 아직 열리지 않은 방이에요');
           }
-        }, 5500);
+        }, 6500);
 
         peer.on('open', () => {
           const conn = peer.connect(P2P_PREFIX + pin, { reliable: true });
           this.clientConn = conn;
 
+          const sendJoinPacket = () => {
+            if(conn && conn.open){
+              try { conn.send({ type: 'JOIN', id: me.id, player }); } catch(e){}
+            }
+          };
+
           conn.on('open', () => {
-            conn.send({ type: 'JOIN', id: me.id, player });
-            // 호스트 응답 대기, 최대 2초 내에 응답 없어도 연결 상태로 진행
-            setTimeout(() => {
-              if(!connected && this.clientConn && this.clientConn.open){
-                connected = true;
-                clearTimeout(timer);
-                resolve();
+            sendJoinPacket();
+            // 호스트가 JOIN 패킷을 확실히 받을 때까지 0.7초 간격으로 재전송
+            this.joinRetryTimer = setInterval(() => {
+              if(connected){
+                clearInterval(this.joinRetryTimer);
+                this.joinRetryTimer = null;
+                return;
               }
-            }, 2000);
+              sendJoinPacket();
+            }, 700);
           });
 
           conn.on('data', data => {
             if(!data || !data.type) return;
-            if(data.type === 'SYNC'){
+            if(data.type === 'HELLO'){
+              sendJoinPacket();
+            } else if(data.type === 'SYNC'){
               this.room = data.room;
-              if(!connected && data.room && data.room.players && data.room.players[me.id]){
-                connected = true;
-                clearTimeout(timer);
-                resolve();
+              if(data.room && data.room.players && data.room.players[me.id]){
+                if(!connected){
+                  connected = true;
+                  settled = true;
+                  clearTimeout(timer);
+                  if(this.joinRetryTimer){ clearInterval(this.joinRetryTimer); this.joinRetryTimer = null; }
+                  resolve();
+                }
+              } else {
+                sendJoinPacket();
               }
               if(this.roomListener) this.roomListener(data.room);
             } else if(data.type === 'KICKED'){
@@ -526,19 +597,21 @@ const P2P = {
           });
 
           conn.on('close', () => {
-            if(S.view === 'room'){
+            if(!connected){
+              failOrRetry('방 연결이 끊어졌어요. 다시 시도해 주세요');
+            } else if(S.view === 'room'){
               toast('방과의 연결이 종료되었습니다');
               leaveRoom();
             }
           });
 
           conn.on('error', err => {
-            if(!connected){ clearTimeout(timer); reject(err); }
+            if(!connected) failOrRetry();
           });
         });
 
         peer.on('error', err => {
-          if(!connected){ clearTimeout(timer); reject(err); }
+          if(!connected) failOrRetry();
         });
       } catch(e) {
         reject(e);
@@ -783,7 +856,7 @@ async function createRoom(){
       do{ pin=String(1000+rnd(9000)); tries++; } while((await DB.get('rooms/'+pin)) && tries<20);
       await DB.set('rooms/'+pin, initialRoom);
     } else {
-      await P2P.createRoom(pin, initialRoom);
+      pin = await P2P.createRoom(pin, initialRoom);
       const d=readLocal(); pathSet(d,'rooms/'+pin,initialRoom); localStorage.setItem(LOCAL_KEY,JSON.stringify(d));
     }
     enterRoom(pin);
