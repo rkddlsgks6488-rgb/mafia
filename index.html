@@ -342,22 +342,44 @@ window.addEventListener('storage',e=>{ if(e.key===LOCAL_KEY) notifyLocal(); });
 
 /* =====================================================================
  * 무설정 하이브리드 클라우드 릴레이 & P2P 엔진
- * 1) MQTT-over-WSS (443/8084/8884 포트 클라우드 브로커 + Retain 상태 저장: 학교 스쿨넷/방화벽 100% 통과)
- * 2) PeerJS WSS 443 웹소켓 직접 릴레이 (UDP/WebRTC가 막힌 교실 유무선 분리망 100% 통과)
- * 3) WebRTC DataChannel + 로컬 탭 동기화 + 백그라운드 탭 절전 방지(Web Worker)
+ * 1) 표준 HTTPS 443 스트리밍 & POST (EventSource/fetch: 웹소켓·UDP가 모두 막힌 학교 태블릿 100% 통과)
+ * 2) MQTT-over-WSS (443/8081/8084/8884 포트 다중 클라우드 브로커 + Retain 상태 저장)
+ * 3) PeerJS WSS 443 웹소켓 직접 릴레이 + WebRTC DataChannel + BroadcastChannel
  * ===================================================================== */
 const P2P_PREFIX = 'swmafia-v3-';
 const MQTT_TOPIC_PREFIX = 'swmafia_kr_v3/room/';
 const MQTT_BROKERS = [
+  'wss://mqtt.eclipseprojects.io:443/mqtt',
+  'wss://test.mosquitto.org:8081/mqtt',
   'wss://broker.emqx.io:8084/mqtt',
   'wss://broker.hivemq.com:8884/mqtt'
 ];
+const NTFY_BASE_URL = 'https://ntfy.sh';
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
   { urls: 'stun:stun.cloudflare.com:3478' }
 ];
+
+function getSwNtfyTopics(pin){
+  return {
+    toHost: `swmafia_kr_v3_${pin}_tohost`,
+    fromHost: `swmafia_kr_v3_${pin}_fromhost`
+  };
+}
+
+function postSwNtfy(topic, payloadObj){
+  try {
+    fetch(`${NTFY_BASE_URL}/${topic}`, {
+      method: 'POST',
+      body: JSON.stringify(payloadObj),
+      headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+      mode: 'cors',
+      cache: 'no-store'
+    }).catch(() => {});
+  } catch(e){}
+}
 
 // 백그라운드 탭(유튜브 설명 영상 재생 등)에서도 방이 끊기지 않도록 깨워주는 Web Worker 타이머
 let bgKeepAliveWorker = null;
@@ -379,15 +401,20 @@ const P2P = {
   clientConns: {},
   clientPeerIds: {},
   mqttClients: [],
+  eventSource: null,
+  bcChannel: null,
+  ntfyThrottleTimer: null,
   activePin: null,
   isHosting: false,
   room: null,
   roomListener: null,
   joinRetryTimer: null,
   lastVer: 0,
+  processedMsgIds: new Set(),
 
   reset(){
     if(this.joinRetryTimer){ clearInterval(this.joinRetryTimer); this.joinRetryTimer = null; }
+    if(this.ntfyThrottleTimer){ clearTimeout(this.ntfyThrottleTimer); this.ntfyThrottleTimer = null; }
     if(this.isHosting && this.activePin){
       // 방장이 방을 닫을 때 클라우드 Retained 상태도 정리
       this.publishMqtt(`${MQTT_TOPIC_PREFIX}${this.activePin}/state`, '', true);
@@ -399,12 +426,15 @@ const P2P = {
       this.mqttClients.forEach(c => { try{ c.end(true); }catch(e){} });
       this.mqttClients = [];
     }
+    if(this.eventSource){ try{ this.eventSource.close(); }catch(e){} this.eventSource = null; }
+    if(this.bcChannel){ try{ this.bcChannel.close(); }catch(e){} this.bcChannel = null; }
     this.clientConns = {};
     this.clientPeerIds = {};
     this.activePin = null;
     this.isHosting = false;
     this.room = null;
     this.lastVer = 0;
+    this.processedMsgIds.clear();
   },
 
   // PeerJS의 WSS 443 시그널링 소켓을 통해 WebRTC 홀펀칭 없이 직접 JSON 패킷 중계
@@ -438,7 +468,46 @@ const P2P = {
     });
   },
 
-  // 다중 클라우드 MQTT-over-WSS 브로커 연결 (학교 방화벽 우회 및 Retain 상태 보존)
+  // 표준 HTTPS(443 포트) EventSource 연결 (학교 태블릿 방화벽 100% 통과용)
+  connectHttpRelay(pin, onMessage, onOpen){
+    if(typeof EventSource === 'undefined') return;
+    try {
+      if(this.eventSource){ try{ this.eventSource.close(); }catch(e){} }
+      const topics = getSwNtfyTopics(pin);
+      const url = this.isHosting
+        ? `${NTFY_BASE_URL}/${topics.toHost}/sse`
+        : `${NTFY_BASE_URL}/${topics.fromHost}/sse?since=30m`;
+      const es = new EventSource(url);
+      this.eventSource = es;
+      es.onopen = () => {
+        if(onOpen) onOpen();
+      };
+      es.onmessage = (ev) => {
+        try {
+          const outer = JSON.parse(ev.data);
+          if(outer && outer.message){
+            const data = JSON.parse(outer.message);
+            if(data) onMessage(data);
+          }
+        } catch(e){}
+      };
+    } catch(e){}
+  },
+
+  // 동일 브라우저 탭 간 즉시 동기화용 BroadcastChannel
+  connectBroadcastChannel(pin, onMessage){
+    if(typeof BroadcastChannel === 'undefined') return;
+    try {
+      if(this.bcChannel){ try{ this.bcChannel.close(); }catch(e){} }
+      const bc = new BroadcastChannel(`swmafia_bc_${pin}`);
+      this.bcChannel = bc;
+      bc.onmessage = (ev) => {
+        if(ev && ev.data) onMessage(ev.data);
+      };
+    } catch(e){}
+  },
+
+  // 다중 클라우드 MQTT-over-WSS 브로커 연결 (443 포함, 학교 방화벽 우회 및 Retain 상태 보존)
   connectMqttBrokers(pin, onMessage, onConnected){
     if(!window.mqtt) return;
     MQTT_BROKERS.forEach((url) => {
@@ -454,14 +523,14 @@ const P2P = {
 
         client.on('connect', () => {
           if(this.isHosting){
-            client.subscribe(`${MQTT_TOPIC_PREFIX}${pin}/to-host`, { qos: 1 });
+            client.subscribe(`${MQTT_TOPIC_PREFIX}${pin}/to-host`, { qos: 0 });
             if(this.room){
               this.publishRoomStateMqtt();
             }
           } else {
-            client.subscribe(`${MQTT_TOPIC_PREFIX}${pin}/state`, { qos: 1 });
-            client.subscribe(`${MQTT_TOPIC_PREFIX}${pin}/to-client`, { qos: 1 });
-            client.subscribe(`${MQTT_TOPIC_PREFIX}${pin}/to-client/${me.id}`, { qos: 1 });
+            client.subscribe(`${MQTT_TOPIC_PREFIX}${pin}/state`, { qos: 0 });
+            client.subscribe(`${MQTT_TOPIC_PREFIX}${pin}/to-client`, { qos: 0 });
+            client.subscribe(`${MQTT_TOPIC_PREFIX}${pin}/to-client/${me.id}`, { qos: 0 });
           }
           if(onConnected) onConnected(client);
         });
@@ -483,7 +552,7 @@ const P2P = {
     this.mqttClients.forEach(c => {
       try {
         if(c && c.connected){
-          c.publish(topic, payload, { qos: 1, retain: !!retain });
+          c.publish(topic, payload, { qos: 0, retain: !!retain });
         }
       } catch(e){}
     });
@@ -493,14 +562,33 @@ const P2P = {
     if(!this.isHosting || !this.activePin || !this.room) return;
     this.room._ver = (this.room._ver || 0) + 1;
     this.room._updatedAt = Date.now();
-    this.publishMqtt(`${MQTT_TOPIC_PREFIX}${this.activePin}/state`, {
+    const syncPacket = {
       type: 'SYNC',
       room: this.room
-    }, true);
+    };
+    this.publishMqtt(`${MQTT_TOPIC_PREFIX}${this.activePin}/state`, syncPacket, true);
+
+    if(this.bcChannel){
+      try { this.bcChannel.postMessage(syncPacket); } catch(e){}
+    }
+
+    // 표준 HTTPS(443) 채널로도 방 상태 게시 (쓰로틀링 적용)
+    if(!this.ntfyThrottleTimer){
+      this.ntfyThrottleTimer = setTimeout(() => {
+        this.ntfyThrottleTimer = null;
+        if(!this.isHosting || !this.activePin || !this.room) return;
+        const topics = getSwNtfyTopics(this.activePin);
+        postSwNtfy(topics.fromHost, { type: 'SYNC', room: this.room });
+      }, 180);
+    }
   },
 
   handleHostIncoming(data, srcPeerId, conn){
     if(!data || !data.type || !this.room) return;
+    if(data._msgId && data.type !== 'JOIN' && data.type !== 'GET_STATE'){
+      if(this.processedMsgIds.has(data._msgId)) return;
+      this.processedMsgIds.add(data._msgId);
+    }
     if(data.type === 'JOIN'){
       const clientId = data.id;
       if(!clientId || !data.player) return;
@@ -621,6 +709,21 @@ const P2P = {
         resolve(finalPin);
       };
 
+      // 0) 동일 기기 BroadcastChannel & 표준 HTTPS(443) 스트리밍 채널 연결
+      this.connectBroadcastChannel(pin, (data) => {
+        this.handleHostIncoming(data, data.senderPeerId || null, null);
+      });
+      this.connectHttpRelay(
+        pin,
+        (data) => {
+          this.handleHostIncoming(data, data.senderPeerId || null, null);
+        },
+        () => {
+          this.publishRoomStateMqtt();
+          finish(pin);
+        }
+      );
+
       // 1) 클라우드 MQTT 브로커 즉시 연결 및 방 상태 Retain 등록
       this.connectMqttBrokers(
         pin,
@@ -631,7 +734,6 @@ const P2P = {
         },
         () => {
           this.publishRoomStateMqtt();
-          // MQTT 클라우드 브로커가 연결되면 방 생성 즉시 성공 보장
           finish(pin);
         }
       );
@@ -654,7 +756,7 @@ const P2P = {
 
       const timer = setTimeout(() => {
         finish(pin);
-      }, 3500);
+      }, 2200);
     });
   },
 
@@ -669,7 +771,14 @@ const P2P = {
     if(peerId && this.hostPeer){
       this.sendViaPeerSocket(this.hostPeer, peerId, { type: 'KICKED' });
     }
-    this.publishMqtt(`${MQTT_TOPIC_PREFIX}${this.activePin}/to-client/${clientId}`, { type: 'KICKED', targetId: clientId }, false);
+    const kickMsg = { type: 'KICKED', targetId: clientId };
+    this.publishMqtt(`${MQTT_TOPIC_PREFIX}${this.activePin}/to-client/${clientId}`, kickMsg, false);
+    if(this.activePin){
+      postSwNtfy(getSwNtfyTopics(this.activePin).fromHost, kickMsg);
+    }
+    if(this.bcChannel){
+      try { this.bcChannel.postMessage(kickMsg); } catch(e){}
+    }
     delete this.clientConns[clientId];
     delete this.clientPeerIds[clientId];
     this.updateRoom({});
@@ -692,11 +801,15 @@ const P2P = {
         if(dstPeerId) this.sendViaPeerSocket(this.hostPeer, dstPeerId, msg);
       });
     }
-    // 3) 클라우드 MQTT 브로드캐스트
+    // 3) 클라우드 MQTT 및 HTTPS 443 브로드캐스트
     if(this.activePin){
       if(msg.type === 'CLOSED'){
         this.publishMqtt(`${MQTT_TOPIC_PREFIX}${this.activePin}/to-client`, msg, false);
         this.publishMqtt(`${MQTT_TOPIC_PREFIX}${this.activePin}/state`, '', true);
+        postSwNtfy(getSwNtfyTopics(this.activePin).fromHost, msg);
+        if(this.bcChannel){
+          try { this.bcChannel.postMessage(msg); } catch(e){}
+        }
       }
     }
   },
@@ -727,20 +840,28 @@ const P2P = {
   },
 
   sendToHost(msg){
-    // 1) 클라우드 MQTT 전송 (가장 확실하게 방화벽 통과)
+    const enriched = {
+      ...msg,
+      _msgId: msg._msgId || `${me.id}_${Date.now()}_${Math.random().toString(36).slice(2,6)}`,
+      senderPeerId: this.clientPeer ? this.clientPeer.id : null
+    };
+    // 1) 클라우드 MQTT 전송
     if(this.activePin){
-      this.publishMqtt(`${MQTT_TOPIC_PREFIX}${this.activePin}/to-host`, {
-        ...msg,
-        senderPeerId: this.clientPeer ? this.clientPeer.id : null
-      }, false);
+      this.publishMqtt(`${MQTT_TOPIC_PREFIX}${this.activePin}/to-host`, enriched, false);
+      // 2) 표준 HTTPS(443 포트) POST 전송 (학교 태블릿 방화벽 100% 통과)
+      postSwNtfy(getSwNtfyTopics(this.activePin).toHost, enriched);
     }
-    // 2) PeerJS WSS 443 소켓 직접 전송
+    // 3) 동일 브라우저 BroadcastChannel 전송
+    if(this.bcChannel){
+      try { this.bcChannel.postMessage(enriched); } catch(e){}
+    }
+    // 4) PeerJS WSS 443 소켓 직접 전송
     if(this.clientPeer && this.activePin){
-      this.sendViaPeerSocket(this.clientPeer, P2P_PREFIX + this.activePin, msg);
+      this.sendViaPeerSocket(this.clientPeer, P2P_PREFIX + this.activePin, enriched);
     }
-    // 3) WebRTC DataChannel 전송
+    // 5) WebRTC DataChannel 전송
     if(this.clientConn && this.clientConn.open){
-      try { this.clientConn.send(msg); } catch(e){}
+      try { this.clientConn.send(enriched); } catch(e){}
     }
   },
 
@@ -768,19 +889,25 @@ const P2P = {
         this.sendToHost({ type: 'JOIN', id: me.id, player });
       };
 
+      const onIncomingPacket = (data) => {
+        if(data && data.room) sawRoomState = true;
+        this.handleClientIncoming(data, onJoinConfirmed);
+        if(data && data.room && (!data.room.players || !data.room.players[me.id])){
+          sendJoinEverywhere();
+        }
+      };
+
+      // 0) BroadcastChannel 및 표준 HTTPS(443 포트) 스트리밍 구독
+      this.connectBroadcastChannel(pin, onIncomingPacket);
+      this.connectHttpRelay(pin, onIncomingPacket, () => {
+        sendJoinEverywhere();
+      });
+
       // 1) 클라우드 MQTT 브로커 구독 및 즉시 JOIN 전송
       this.connectMqttBrokers(
         pin,
-        (topic, data) => {
-          if(data && data.room) sawRoomState = true;
-          this.handleClientIncoming(data, onJoinConfirmed);
-          if(data && data.room && (!data.room.players || !data.room.players[me.id])){
-            sendJoinEverywhere();
-          }
-        },
-        () => {
-          sendJoinEverywhere();
-        }
+        (topic, data) => onIncomingPacket(data),
+        () => sendJoinEverywhere()
       );
 
       // 2) PeerJS (WSS 443 직접 소켓 릴레이 + WebRTC DataChannel) 동시 시도
@@ -793,15 +920,9 @@ const P2P = {
           this.clientPeer = peer;
 
           peer.on('open', () => {
-            this.attachPeerSocketRelay(peer, (msg) => {
-              if(msg && msg.room) sawRoomState = true;
-              this.handleClientIncoming(msg, onJoinConfirmed);
-              if(msg && msg.room && (!msg.room.players || !msg.room.players[me.id])){
-                sendJoinEverywhere();
-              }
-            });
+            this.attachPeerSocketRelay(peer, (msg) => onIncomingPacket(msg));
 
-            // WSS 443 시그널링 채널로 즉시 JOIN 발송 (WebRTC 대기 시간 0초!)
+            // WSS 443 시그널링 채널로 즉시 JOIN 발송
             sendJoinEverywhere();
 
             // WebRTC DataChannel도 병렬 연결
@@ -815,7 +936,7 @@ const P2P = {
                   sawRoomState = true;
                   sendJoinEverywhere();
                 } else {
-                  this.handleClientIncoming(data, onJoinConfirmed);
+                  onIncomingPacket(data);
                 }
               });
             } catch(e){}
@@ -829,7 +950,8 @@ const P2P = {
         } catch(e){}
       }
 
-      // 0.6초 간격으로 모든 채널(MQTT + WSS 443 + WebRTC)에 JOIN 패킷 반복 전송
+      // 초기 JOIN 패킷 즉시 전송 및 1.1초 간격 재전송
+      sendJoinEverywhere();
       this.joinRetryTimer = setInterval(() => {
         if(connected){
           clearInterval(this.joinRetryTimer);
@@ -837,7 +959,7 @@ const P2P = {
           return;
         }
         sendJoinEverywhere();
-      }, 600);
+      }, 1100);
 
       // 최대 10초 대기 후 최종 판정
       const timer = setTimeout(() => {
